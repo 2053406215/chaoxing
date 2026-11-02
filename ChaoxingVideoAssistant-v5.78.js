@@ -43,30 +43,41 @@ Navigator.prototype.waitRow=function(row,now){
  if(row.fullyVisible===false)return {type:'align',id:row.id};
  return this.waitFor(row.id,now);
 };
-Navigator.prototype.scroll=function(direction){
+Navigator.prototype.scroll=function(direction,s){
  if(++this.scrolls>64){this.halt='定位达到上限';return {type:'hold',reason:this.halt};}
- return {type:'scroll',direction:direction};
+ // 没有列表索引时只能靠相邻两屏的重叠行证明连续；整页翻动会丢失覆盖并反复回顶。
+ var overlap=direction==='forward'&&!!s&&(s.from===null||s.from===undefined);
+ return {type:'scroll',direction:direction,overlap:overlap};
 };
+Navigator.prototype.settle=function(){this.scrolls=0;this.waits={};this.samples=0;this.signature='';};
 Navigator.prototype.merge=function(s){
  var ids=s.rows.map(function(r){return r.id;}),previous=this.previous;
  if(s.atStart){this.covered=true;this.order=ids.slice();}
  else if(this.covered&&previous){
   var overlap=previous.ids.some(function(id){return ids.indexOf(id)>=0;});
-  var contiguous=previous.to!==null&&s.from!==null&&s.from>=previous.from&&s.from<=previous.to+1;
+  var contiguous=previous.to!==null&&previous.to!==undefined&&s.from!==null&&s.from!==undefined&&s.to!==null&&s.to!==undefined&&
+   s.from<=previous.to+1&&s.to>=previous.from-1;
   if(!overlap&&!contiguous)this.covered=false;
-  else ids.forEach(function(id){if(this.order.indexOf(id)<0)this.order.push(id);},this);
+  else ids.forEach(function(id){if(this.order.indexOf(id)<0){this.order.push(id);this.scrolls=0;}},this);
  }
+ delete this.waits.directory;
  s.rows.forEach(function(row){this.records[row.id]=row;if(resolved(row))delete this.waits[row.id];},this);
  this.previous={ids:ids,from:s.from,to:s.to};
 };
 Navigator.prototype.seek=function(s,target){
- if(target&&target.number&&s.rows[0]&&s.rows[0].number){
-  return this.scroll(numberCompare(s.rows[0].number,target.number)>0?'backward':'forward');
+ var numbered=s.rows.filter(function(r){return r.number;});
+ if(target&&target.number&&numbered.length){
+  if(numberCompare(target.number,numbered[0].number)<0)return this.scroll('backward',s);
+  if(numberCompare(target.number,numbered[numbered.length-1].number)>0){
+   if(s.atEnd)return null;
+   return this.scroll('forward',s);
+  }
+  if(numbered.some(function(r){return r.number===target.number;})||numbered.length>1)return null;
  }
- if(target&&this.covered&&this.order.indexOf(target.id)<0)return this.scroll('forward');
+ if(target&&this.covered&&this.order.indexOf(target.id)<0)return this.scroll('forward',s);
  if(target&&this.covered){
   var first=this.order.indexOf(s.rows[0].id),index=this.order.indexOf(target.id);
-  if(first>=0&&index>=0)return this.scroll(index<first?'backward':'forward');
+  if(first>=0&&index>=0)return this.scroll(index<first?'backward':'forward',s);
  }
  return this.scroll('backward');
 };
@@ -90,31 +101,35 @@ Navigator.prototype.observe=function(s,now,anchor){
  var target=this.target||(this.anchor&&{id:this.anchor.id,title:this.anchor.title,number:this.anchor.number});
  if(target){
   var visible=s.rows.filter(function(r){return r.id===target.id;})[0];
-  if(!visible)return this.seek(s,target);
-  if(!resolved(visible))return this.waitRow(visible,now);
-  if(visible.status==='incomplete'){
-   this.target={id:visible.id,title:visible.title,number:visible.number};
-   return this.openIntent(s,visible);
+  if(!visible){
+   var sought=this.seek(s,target);if(sought)return sought;
+   // 章节号范围已覆盖却找不到：保存的进度身份失效（改名、删除），丢弃后从头确认。
+  }else{
+   if(!resolved(visible))return this.waitRow(visible,now);
+   if(visible.status==='incomplete'){
+    this.target={id:visible.id,title:visible.title,number:visible.number};
+    return this.openIntent(s,visible);
+   }
   }
   // Re-evaluate from a proven prefix; do not advance just because a cached target changed.
   this.target=null;this.anchor=null;
-  if(!s.atStart){this.covered=false;return this.scroll('backward');}
+  if(!s.atStart){this.covered=false;return this.scroll('backward',s);}
  }
  if(!this.covered)return this.scroll('backward');
  for(var i=0;i<this.order.length;i++){
   var row=this.records[this.order[i]];
   if(!row||!resolved(row)){
-   if(row&&!ids[row.id])return this.seek(s,row);
+   if(row&&!ids[row.id])return this.seek(s,row)||this.scroll('backward',s);
    return row?this.waitRow(row,now):this.waitFor(this.order[i],now);
   }
   if(row.status==='incomplete'){
    this.target={id:row.id,title:row.title,number:row.number};
-   if(!ids[row.id])return this.seek(s,this.target);
+   if(!ids[row.id])return this.seek(s,this.target)||this.scroll('backward',s);
    return this.openIntent(s,row);
   }
  }
  if(s.atEnd){this.halt='全部章节已完成';return {type:'complete',reason:this.halt};}
- return this.scroll('forward');
+ return this.scroll('forward',s);
 };
 Navigator.prototype.openIntent=function(s,row){
  var isProgress=this.anchor&&this.anchor.id===row.id,prefix=[];
@@ -152,7 +167,7 @@ Navigator.prototype.arrive=function(heading,now){
  this.arrivalSamples++;
  if(this.arrivalSamples<2||now-this.arrivalAt<this.quietMs)return {type:'wait',reason:'核对章节内容'};
  this.anchor={id:flight.id,title:flight.title,number:flight.number};
- this.flight=null;this.inDirectory=false;this.halt='';
+ this.flight=null;this.inDirectory=false;this.halt='';this.settle();
  return {type:'entered',course:this.course,anchor:this.anchor};
 };
 function textStatus(text){
@@ -195,7 +210,10 @@ var PKG='com.chaoxing.mobile';
 function safe(fn,fallback){try{return fn();}catch(ignore){return fallback;}}
 function nodeId(node){return safe(function(){return String(node.id());},'');}
 function bounds(node){return safe(function(){var b=node.bounds();return [b.left,b.top,b.right,b.bottom];},null);}
-function heading(value){var text=String(value||''),m=text.match(/^\s*(\d+(?:\.\d+)+)\s*([^\d.\s].*)$/);return {number:m?m[1]:'',title:m?m[2]:text};}
+function heading(value){
+ var text=String(value||''),m=text.match(/^\s*(\d+(?:\.\d+)+)(?:[\s.．、:：]+|(?=[^\d.\s]))(.*[^\d.\s].*)$/);
+ return {number:m?m[1]:'',title:m?m[2].trim():text};
+}
 function Bridge(env){
  this.env=env;this.nav=new core.Navigator();this.cache=null;this.revision=0;this.range=null;this.alignAttempts={};
  this.lastMessage='';this.messageAt=0;this.manualNotice=false;this.resumeEpoch=env.store.get('chapterResumeEpoch',0);
@@ -333,13 +351,14 @@ Bridge.prototype.snapshot=function(force){
  if(allResolved)this.cache={signature:sig,revision:revision,at:now,states:states};else this.cache=null;
  return before;
 };
-Bridge.prototype.scroll=function(s,direction,small){
+Bridge.prototype.scroll=function(s,direction,small,overlap){
  this.env.requireApp();
  var fresh=this.geometry();if(!fresh||core.layout(fresh)!==core.layout(s))return false;
  this.nav.motion(Date.now());this.invalidate();this.range=null;
  // Native list actions avoid injecting a fling. Indices or overlapping rows verify coverage after each page.
  if(direction==='backward'&&safe(function(){return fresh.list.scrollBackward();},false))return true;
- if(!small&&direction==='forward'&&safe(function(){return fresh.list.scrollForward();},false))return true;
+ // 没有滚动索引时整页翻动可能跳过章节，改用保留约七成重叠的短滑动。
+ if(!small&&!overlap&&direction==='forward'&&safe(function(){return fresh.list.scrollForward();},false))return true;
  var a=fresh.area,x=Math.round((a[0]+a[2])/2),height=a[3]-a[1];
  var delta=small?.18:.30;
  return swipe(x,Math.round(a[1]+height*(direction==='backward'?.45:.45+delta)),x,Math.round(a[1]+height*(direction==='backward'?.45+delta:.45)),400);
@@ -391,7 +410,7 @@ Bridge.prototype.step=function(){
   var row=this.nav.begin(result.ticket,fresh,Date.now());if(!row)return true;
   if(!this.click(row)){this.nav.halt='章节点击结果未确认';this.message('章节目标未能安全点击，停留核对；不会使用旧坐标或重复点击');}
   else this.message('按已确认进度进入未完成章节：'+row.title);
- }else if(result.type==='scroll'){this.scroll(snapshot,result.direction);}
+ }else if(result.type==='scroll'){this.scroll(snapshot,result.direction,false,result.overlap);}
  else if(result.type==='align'){
   var partial=snapshot.rows.filter(function(r){return r.id===result.id;})[0];
   if(partial)this.align(snapshot,partial);
@@ -412,7 +431,7 @@ Bridge.prototype.rememberConfirmedNext=function(title){
  var anchor={id:core.identity(h.number,h.title),number:h.number,title:h.title};
  // Next-section arrival is an authorized chapter transition, not a manual directory selection.
  // Loading can briefly expose the old directory tree; clear that phase only after a verified new heading.
- this.nav.inDirectory=false;this.nav.anchor=anchor;this.nav.target=null;this.nav.halt='';this.invalidate();
+ this.nav.inDirectory=false;this.nav.anchor=anchor;this.nav.target=null;this.nav.halt='';this.nav.settle();this.invalidate();
  if(this.nav.course){
   var progress=this.env.store.get('chapterProgress_v1',{});progress[this.nav.course]=anchor;
   this.env.store.put('chapterProgress_v1',progress);
