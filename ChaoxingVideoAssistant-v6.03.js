@@ -1263,7 +1263,7 @@ function scanUnfinishedChapters(existingView){
           cxLog('目录识字定位：在 '+pNum+' 下方识别到下一章节 '+cand.t.slice(0,22));
           break;}}}}
   if(targetRow&&tap(Math.round(W*0.48),targetRow.y)){
-    STATE.dirScrollStill=0;STATE.dirScrollUp=false;STATE.dirSweepCount=0;
+    STATE.dirScrollStill=0;STATE.dirScrollUp=false;
     var visitKey=targetRow.num||targetRow.t;
     STATE.dirRowVisits[visitKey]=(STATE.dirRowVisits[visitKey]||0)+1;
     STATE.answered={};STATE.countedQuizIds={};STATE.choiceAttempted={};STATE.multipleConfirmed={};STATE.multipleExpected={};STATE.multipleFailures={};
@@ -2016,6 +2016,7 @@ function handleVideoLoadFailure(){
   return false;}
 function exitLandscapeAfterVideo(reason){
   restoreMediaVolume();
+  var firstExit=!STATE.finished;
   STATE.finished=true;
   STATE.video=false;
   STATE.videoExitAt=Date.now();
@@ -2025,7 +2026,7 @@ function exitLandscapeAfterVideo(reason){
   if(STATE.activeVideoKey){
     STATE.videoFinishedKeys=STATE.videoFinishedKeys||{};
     STATE.videoFinishedKeys[STATE.activeVideoKey]=true;}
-  SESSION_STATS.videos++;
+  if(firstExit)SESSION_STATS.videos++;
   cxLog((reason||'视频播放完成，退出全屏返回本节核对剩余任务点')+'（累计完成视频 '+SESSION_STATS.videos+' 个）');
   safeBack();
   sleep(950);}
@@ -2057,7 +2058,7 @@ function player(v){
       exitLandscapeAfterVideo('视频播放完成('+t[0]+'s/'+t[1]+'s)，退出全屏继续本节任务');
       return;}
     STATE.videoEndConfirmCount=0;
-    if(STATE.lastTime===t[0]&&t[1]>0&&t[0]<t[1]-2){
+    if(STATE.lastTime===t[0]&&t[1]>0&&t[0]<t[1]-1){
       STATE.videoStallTicks=(STATE.videoStallTicks||0)+1;
       if(STATE.videoStallTicks>=2){
         STATE.videoStallTicks=0;
@@ -2621,7 +2622,11 @@ function finishPager(v){
       var mDone=Object.keys(STATE.answered).some(function(k){return k.indexOf(mPrefix)===0&&STATE.answered[k];});
       if(!mDone)missingNums.push(mi);}
     var prevBtn=cxFind(v,/上一题/,H*.48);
-    if(prevBtn||pager.y){
+    STATE.pagerBackTries=STATE.pagerBackTries||{};
+    var backKey=(STATE.quizContext||'')+'|'+missingNums[0];
+    if((prevBtn||pager.y)&&(STATE.pagerBackTries[backKey]||0)<2){
+      STATE.pagerBackTries[backKey]=(STATE.pagerBackTries[backKey]||0)+1;
+      STATE.pagerBackTarget=missingNums[0];STATE.pagerBackSteps=0;
       cxLog('已到末题，回退补答未确认题目：第 '+missingNums.join('、')+' 题');
       if(prevBtn&&cxPress(prevBtn))sleep(500);
       else {tap(Math.round(W*0.16),pager.y);sleep(500);}
@@ -2629,7 +2634,8 @@ function finishPager(v){
       return true;}
     if(Date.now()-STATE.lastLog>12000){
       STATE.lastLog=Date.now();
-      cxLog('已到末题，但仍有未确认答案；暂不提交');}
+      cxLog('已到末题，但第 '+missingNums.join('、')+' 题仍未确认作答；暂不提交，请手动检查');}
+    sleep(600);
     return true;}
   if(Date.now()-STATE.lastFinishAt<8000)return true;
   STATE.lastFinishAt=Date.now();
@@ -2974,6 +2980,15 @@ function scanQuestion(first,initialView){
       }).join(',')+
       '，到达题尾='+item.complete);
   return item;}
+function fillOptionLetters(options){
+  var count=4;
+  options.forEach(function(o){count=Math.max(count,o.l.charCodeAt(0)-64);});
+  var out=[];
+  for(var i=0;i<count;i++){
+    var letter=String.fromCharCode(65+i);
+    var hit=options.filter(function(o){return o.l===letter;})[0];
+    out.push({l:letter,t:(hit&&hit.t)?hit.t:('选项 '+letter)});}
+  return out;}
 function choicesComplete(item){
   if(item.kind==='short'||item.kind==='blank')return true;
   var minCount=item.kind==='judge'?2:4;
@@ -3788,6 +3803,18 @@ function recoverMissingQuestion(v){
 function quiz(v){
   if(recoverMissingQuestion(v))return;
   STATE.quizPending=true;
+  if(STATE.pagerBackTarget){
+    var backPager=pagerInfo(v);
+    STATE.pagerBackSteps=(STATE.pagerBackSteps||0)+1;
+    if(!backPager||backPager.number<=STATE.pagerBackTarget||STATE.pagerBackSteps>backPager.total+5){
+      STATE.pagerBackTarget=0;
+    }else{
+      var backBtn=cxFind(v,/上一题/,H*.48);
+      if((backBtn&&cxPress(backBtn))||tap(Math.round(W*0.16),backPager.y)){
+        if(STATE.lastPagerNumber>1)STATE.lastPagerNumber--;
+        sleep(450);
+        return;}
+      STATE.pagerBackTarget=0;}}
   var heads=questions(v),first=null;
   if(!heads.length){
     if(quizSubmitButton(v)&&submitWorkIfComplete(v,''))return;
@@ -3875,13 +3902,7 @@ function quiz(v){
       STATE.lastQuiz=id;}
     if(!item.complete||(!item.visualFrames&&item.q.length<10)||!choicesComplete(item)){
       if(item.kind!=='short'&&item.kind!=='blank'&&item.options.length>=3&&item.q.length>=10){
-        var expectedLen=Math.max(4,item.options.length);
-        var fixedOpts=[];
-        for(var oi=0;oi<expectedLen;oi++){
-          var expL=String.fromCharCode(65+oi);
-          var existOpt=item.options.filter(function(o){return o.l===expL;})[0]||item.options[oi];
-          fixedOpts.push({l:expL,t:(existOpt&&existOpt.t)?existOpt.t:('选项 '+expL)});}
-        item.options=fixedOpts;
+        item.options=fillOptionLetters(item.options);
         item.complete=true;}}
     if(!item.complete||(!item.visualFrames&&item.q.length<10)||!choicesComplete(item)){
       STATE.scanFailures[id]=(STATE.scanFailures[id]||0)+1;
@@ -3895,12 +3916,7 @@ function quiz(v){
       if(item.kind==='judge'){
         item.options=[{l:'A',t:'对'},{l:'B',t:'错'}];
       }else if(item.kind==='single'||item.kind==='multiple'){
-        var fallbackOpts=[];
-        for(var fi=0;fi<4;fi++){
-          var fl=String.fromCharCode(65+fi);
-          var fo=item.options.filter(function(o){return o.l===fl;})[0]||item.options[fi];
-          fallbackOpts.push({l:fl,t:(fo&&fo.t)?fo.t:('选项 '+fl)});}
-        item.options=fallbackOpts;}
+        item.options=fillOptionLetters(item.options);}
       if(!item.q||item.q.length<10)item.q=id+' '+(item.q||'题目');
       item.complete=true;}
     delete STATE.scanFailures[id];
@@ -4319,7 +4335,7 @@ function chapter(v){
       return;}
     if(todo.kind==='video'){
       STATE.quizPending=false;
-      var inlineTimes=twoTimes(v.s,v,false);
+      var inlineTimes=twoTimes(todo.text,{n:todo.nodes},false);
       if(inlineTimes&&inlineTimes[1]>0){
         STATE.lastTime=inlineTimes[0];
         STATE.total=inlineTimes[1];
@@ -4541,7 +4557,12 @@ function discussion(v){
       var sendPage=view();
       var sendBtn=cxId(PKG+':id/btnSubmit').findOnce()||cxFind(sendPage,/^(?:发布|发送|提交|完成|发表)$/,H*0.35);
       persist({status:'posted',text:answer,at:Date.now()});
-      if(sendBtn&&typeof sendBtn.click==='function'){try{sendBtn.click();}catch(ignore){tap(sendBtn.x||Math.round(W*0.91),sendBtn.y||Math.round(H*0.62));}}
+      if(sendBtn&&typeof sendBtn.click==='function'){
+        var sendClicked=false,sendBounds=null;
+        try{sendClicked=!!sendBtn.click();}catch(ignore){}
+        if(!sendClicked){
+          try{sendBounds=sendBtn.bounds();}catch(ignore){}
+          tap(sendBounds?sendBounds.centerX():Math.round(W*0.91),sendBounds?sendBounds.centerY():Math.round(H*0.62));}}
       else if(sendBtn)tap(sendBtn.x,sendBtn.y);
       else tap(Math.round(W*0.91),Math.round(H*0.62));
       sleep(550);
@@ -4611,7 +4632,7 @@ while(true){
       resumeVideoNetworkAfterPause(Date.now()-(STATE.outsideStartedAt||Date.now()));
       STATE.pausedOutside=false;
       STATE.lastAnswerView=null;STATE.preloadedQuizView=null;
-      W=Math.min(device.width,device.height);H=Math.max(device.width,device.height);
+      W=Math.min(device.width||1080,device.height||2400);H=Math.max(device.width||1080,device.height||2400);
       STATE.chapterWatch=null;
       cxLog('已回到学习通，重新识别当前页面后继续处理');}
     if(handleVideoNetworkRecovery())continue;
@@ -4624,7 +4645,7 @@ while(true){
       var readingPage=view();
       if(!checkReadingTask(readingPage))chapter(readingPage);
       continue;}
-    if(land()||nativeVideoNode('rvSpeed')){player(null);continue;}
+    if(land()){player(null);continue;}
     var v=STATE.preloadedQuizView||view();
     STATE.preloadedQuizView=null;
     SMART_RECOGNIZER.analyze(v);
