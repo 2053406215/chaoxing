@@ -1,12 +1,13 @@
-// v6.03 回归测试：Root 引擎探测、未及格重做、讨论发表核对。
+// 回归测试：Root 引擎探测、未及格重做、讨论发表核对。
 // 运行：node test/redo-root-discussion.test.js
 var fs=require('fs'),path=require('path'),assert=require('assert');
-var src=fs.readFileSync(path.join(__dirname,'..','ChaoxingVideoAssistant-v6.03.js'),'utf8');
+var file=fs.readdirSync(path.join(__dirname,'..')).filter(function(f){return /^ChaoxingVideoAssistant-v6\.\d+\.js$/.test(f);}).sort().pop();
+var src=fs.readFileSync(path.join(__dirname,'..',file),'utf8');
 var cut=src.indexOf('enableBackgroundKeepAlive();\ninitFloatingControlPanel();');
 assert(cut>0,'未找到主循环入口');
 var body=src.slice(0,cut)+'\nglobalThis.__t={STATE:STATE,ask:ask,questions:questions,discussion:discussion,'+
   'handleQuizNotPassed:handleQuizNotPassed,quizAbandoned:quizAbandoned,getExecutionMode:getExecutionMode,'+
-  'runShellCmd:runShellCmd,ROOT_PROBE:ROOT_PROBE,LOCAL_QB:LOCAL_QB,APP_VERSION:APP_VERSION,MAX_QUIZ_REDO:MAX_QUIZ_REDO};\n})();';
+  'runShellCmd:runShellCmd,ROOT_PROBE:ROOT_PROBE,LOCAL_QB:LOCAL_QB,APP_VERSION:APP_VERSION,CFG:CFG};\n})();';
 
 var now=1e12;Date.now=function(){return now;};
 var W=1080,H=2400,PKG='com.chaoxing.mobile';
@@ -39,7 +40,7 @@ function page(texts){
   return {n:n,s:texts.join('|')};}
 
 // 1. 版本号只有一个来源，且与文件名一致。
-assert.strictEqual(t.APP_VERSION,'6.03');
+assert.strictEqual('ChaoxingVideoAssistant-v'+t.APP_VERSION+'.js',file,'版本号应与文件名一致');
 assert(!/v6\.14/.test(src),'不应再残留 v6.14 字样');
 
 // 2. Root 引擎：无障碍和 Shizuku 都不可用时，su 可用则启用 root；不可用则 60 秒内不重复探测。
@@ -78,7 +79,7 @@ t.ask(item);
 assert.strictEqual(sim.payloads.length,2,'重做时应重新请求而不是复用上次答案');
 assert(/上次提交的答案是：B/.test(sim.payloads[1].messages[1].content),'重做请求应带上一次的答案作为提示');
 assert.strictEqual(t.handleQuizNotPassed(page(['已提交','本次得分 100'])),false,'没有未及格字样时不处理');
-for(var r=1;r<t.MAX_QUIZ_REDO;r++){
+for(var r=1;r<t.CFG.maxRedo;r++){
   t.STATE.awaitingSubmitResult=true;t.STATE.awaitingSubmitAt=now-5000;
   t.handleQuizNotPassed(failed);}
 assert.strictEqual(t.quizAbandoned(),false);

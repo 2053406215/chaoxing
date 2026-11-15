@@ -1,12 +1,21 @@
-// ChaoxingVideoAssistant-v6.03.js
-// 超星学习通课程助手 v6.03（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// ChaoxingVideoAssistant-v6.04.js
+// 超星学习通课程助手 v6.04（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// v6.04：修复 v6.03 的逻辑错误；Root 引擎可用；未及格自动重做；讨论发表核对；
+//        结果页学习正确答案；卡住自动恢复与提醒；漏答弹窗自动补答；答题接口与模型可配置。
 (function(){
 var PKG='com.chaoxing.mobile';
-var APP_VERSION='6.03';
+var APP_VERSION='6.04';
 var STORE=storages.create('chaoxing_assistant_v578');
 var W=Math.min(device.width||1080,device.height||2400);
 var H=Math.max(device.width||1080,device.height||2400);
 var KEY=String(STORE.get('deepseekKey','')||'').trim();
+var DEFAULT_LLM_URL='https://api.deepseek.com/chat/completions',DEFAULT_LLM_MODEL='deepseek-chat';
+function cleanLlmUrl(value){
+  var url=String(value||'').trim();
+  return /^https?:\/\/\S+$/i.test(url)?url:DEFAULT_LLM_URL;}
+var LLM={
+  url:cleanLlmUrl(STORE.get('llmUrl','')),
+  model:String(STORE.get('llmModel','')||'').trim()||DEFAULT_LLM_MODEL};
 var VISION={
   url:String(STORE.get('visionUrl','https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions')||'').trim(),
   model:String(STORE.get('visionModel','qwen-vl-max')||'').trim(),
@@ -16,6 +25,9 @@ var PERM_GUIDE_SHOWN=false;
 var NO_AX_BACKEND='';
 var SHIZUKU_REQ_TRIED=false;
 var ROOT_PROBE={ok:false,at:0};
+var NOTIFY={at:0,seen:{}};
+var STALL_LIMIT_MS=240000;
+var WATCHDOG={sig:'',since:0,lastTickAt:0,recoveries:0};
 var SCREEN_CAPTURE_READY=false;
 var WAKE_LOCK=null,WIFI_LOCK=null,FLOAT_WIN=null;
 var RECENT_LOGS=[];
@@ -158,7 +170,45 @@ function cxLog(msg){
   FULL_LOGS.push(stamped);
   if(FULL_LOGS.length>400)FULL_LOGS.shift();
   appendLogToFile(stamped);
-  updateFloatingStatus(text);}
+  updateFloatingStatus(text);
+  if(/请手动|请核对|停留检查|停留核对|等待检查|请检查页面|自动恢复无效/.test(text))notifyUser(text);}
+function notifyUser(msg){
+  var text=String(msg||'').slice(0,80),nowN=Date.now(),kind=text.replace(/\d+/g,'#').slice(0,24);
+  if(nowN-NOTIFY.at<60000||nowN-(NOTIFY.seen[kind]||0)<300000)return;
+  NOTIFY.at=nowN;NOTIFY.seen[kind]=nowN;
+  try{if(typeof device!=='undefined'&&device.vibrate)device.vibrate(600);}catch(ignore){}
+  try{toast(text);}catch(ignore){}
+  try{if(typeof notice==='function')notice('超星助手需要你看一下',text);}catch(ignore){}}
+function watchdogSignature(){
+  return [SESSION_STATS.videos,SESSION_STATS.quizzes,SESSION_STATS.discussions,SESSION_STATS.docs,SESSION_STATS.skipped.length,
+    STATE.lastTime,STATE.quizContext||'',Object.keys(STATE.answered||{}).length,STATE.lastPagerNumber||0,RESUME_CHAPTER,
+    STATE.dirSweepCount||0,Object.keys(STATE.dirRowVisits||{}).length,STATE.lastDirSig||'',
+    STATE.quizRedoCount?JSON.stringify(STATE.quizRedoCount):''].join('|');}
+function watchdogTick(v){
+  if(!CFG.watchdog)return false;
+  var nowW=Date.now(),sig=watchdogSignature();
+  var resumed=nowW-WATCHDOG.lastTickAt>20000;
+  WATCHDOG.lastTickAt=nowW;
+  if(sig!==WATCHDOG.sig||resumed||STATE.video||STATE.doc||STATE.readingVisit){
+    if(sig!==WATCHDOG.sig)WATCHDOG.recoveries=0;
+    WATCHDOG.sig=sig;WATCHDOG.since=nowW;
+    return false;}
+  if(nowW-WATCHDOG.since<STALL_LIMIT_MS)return false;
+  WATCHDOG.since=nowW;
+  var mins=Math.round(STALL_LIMIT_MS/60000);
+  if(/开始考试|正式考试|考试倒计时/.test(v.s)){
+    notifyUser('当前是正式考试页面，脚本不会操作，请手动处理');
+    return false;}
+  WATCHDOG.recoveries++;
+  if(WATCHDOG.recoveries>2){
+    cxLog('看门狗：已连续 '+mins*WATCHDOG.recoveries+' 分钟没有进展，自动恢复无效，停在当前页面');
+    return false;}
+  STATE.blocked='';STATE.navBlocked='';STATE.quizSeek=null;STATE.afterSubmit=false;STATE.awaitingSubmitResult=false;
+  STATE.taskTopReady=false;STATE.taskTopSignature='';STATE.chapterFullScanDone=false;STATE.lastAnswerView=null;STATE.preloadedQuizView=null;
+  cxLog('看门狗：'+mins+' 分钟没有进展，退回上一级重新定位（'+WATCHDOG.recoveries+'/2）');
+  notifyUser('脚本卡住 '+mins+' 分钟，已尝试自动恢复');
+  if(!isDirectoryPage(v)){safeBack();sleep(800);}
+  return true;}
 function buildDiagnosticReport(){
   var mode=NO_AX_BACKEND||(typeof auto!=='undefined'&&auto&&auto.service?'accessibility':'none');
   var ansKeys=Object.keys(STATE.answered||{}).filter(function(k){return STATE.answered[k];});
@@ -239,7 +289,13 @@ var CFG={
   singleCharFix:STORE.get('cfgSingleCharFix',true)!==false,
   autoReturnFg:STORE.get('autoReturnForeground',true)!==false,
   skipDiscussion:STORE.get('cfgSkipDiscussionV2',false)===true,
-  onlyVideoQuiz:STORE.get('cfgOnlyVideoQuizV2',false)===true};
+  onlyVideoQuiz:STORE.get('cfgOnlyVideoQuizV2',false)===true,
+  maxRedo:clampRedo(STORE.get('cfgMaxRedo',2)),
+  watchdog:STORE.get('cfgWatchdog',true)!==false};
+function clampRedo(value){
+  var n=Number(value);
+  if(!(n>=0))n=2;
+  return Math.min(5,Math.floor(n));}
 var SAVED_MEDIA_VOL=-1;
 function muteMediaForVideo(){
   if(!CFG.autoMute)return;
@@ -456,6 +512,10 @@ function openVisualControlCenter(isInitial){
                   '<input id="inpDeepseek" text="" hint="sk-..." textColor="#F8FAFC" textColorHint="#475569" textSize="12sp" singleLine="true"/>'+
                   '<text text="阿里云百炼 / OpenAI 识图 Key（选填 · 仅图片题需要）" textColor="#94A3B8" textSize="11sp" marginTop="6dp"/>'+
                   '<input id="inpVision" text="" hint="sk-...（可留空）" textColor="#F8FAFC" textColorHint="#475569" textSize="12sp" singleLine="true"/>'+
+                  '<text text="答题接口地址（选填 · 留空用 DeepSeek 官方，可填 OpenAI 兼容中转）" textColor="#94A3B8" textSize="11sp" marginTop="6dp"/>'+
+                  '<input id="inpLlmUrl" text="" hint="'+DEFAULT_LLM_URL+'" textColor="#F8FAFC" textColorHint="#475569" textSize="12sp" singleLine="true"/>'+
+                  '<text text="答题模型名（选填 · 留空用 '+DEFAULT_LLM_MODEL+'）" textColor="#94A3B8" textSize="11sp" marginTop="6dp"/>'+
+                  '<input id="inpLlmModel" text="" hint="'+DEFAULT_LLM_MODEL+'" textColor="#F8FAFC" textColorHint="#475569" textSize="12sp" singleLine="true"/>'+
                 '</vertical>'+
               '</card>'+
               '<card cardCornerRadius="14dp" cardElevation="4dp" cardBackgroundColor="#131C2E" marginBottom="10dp">'+
@@ -471,6 +531,11 @@ function openVisualControlCenter(isInitial){
                   '<checkbox id="chkSingleChar" text="单字答案双写回删兼容（解决 Vivo/OriginOS 单字不粘贴）" checked="'+CFG.singleCharFix+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
                   '<checkbox id="chkAutoReturn" text="后台挂机视频播完自动拉回学习通" checked="'+CFG.autoReturnFg+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
                   '<checkbox id="chkSkipDisc" text="仅做视频与测验（不勾选则自动做讨论题与秒点PDF文档）" checked="'+CFG.onlyVideoQuiz+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
+                  '<checkbox id="chkWatchdog" text="卡住 4 分钟自动退回重新定位，并震动提醒" checked="'+CFG.watchdog+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
+                  '<horizontal gravity="center_vertical" marginTop="4dp">'+
+                    '<text text="测验未及格自动重做次数:" textColor="#F1F5F9" textSize="12sp" layout_weight="1"/>'+
+                    '<spinner id="spnMaxRedo" entries="0 次|1 次|2 次|3 次|4 次|5 次" textColor="#38BDF8"/>'+
+                  '</horizontal>'+
                 '</vertical>'+
               '</card>'+
               '<card cardCornerRadius="14dp" cardElevation="4dp" cardBackgroundColor="#131C2E" marginBottom="12dp">'+
@@ -498,6 +563,11 @@ function openVisualControlCenter(isInitial){
           contentView.txtRecentLogs.setText(recentStr);
           var spdList=[2.0,1.5,1.25,1.0];var spdIdx=spdList.indexOf(Number(CFG.maxSpeed)||2.0);
           if(spdIdx>=0&&contentView.spnMaxSpeed)contentView.spnMaxSpeed.setSelection(spdIdx);
+        }catch(ignore){}
+        try{
+          contentView.inpLlmUrl.setText(LLM.url===DEFAULT_LLM_URL?'':LLM.url);
+          contentView.inpLlmModel.setText(LLM.model===DEFAULT_LLM_MODEL?'':LLM.model);
+          contentView.spnMaxRedo.setSelection(CFG.maxRedo);
         }catch(ignore){}
         var dlg=new android.app.AlertDialog.Builder(context).setView(contentView).create();
         try{
@@ -527,6 +597,16 @@ function openVisualControlCenter(isInitial){
           CFG.autoReturnFg=!!contentView.chkAutoReturn.isChecked();
           CFG.onlyVideoQuiz=!!contentView.chkSkipDisc.isChecked();
           CFG.skipDiscussion=CFG.onlyVideoQuiz;
+          try{
+            LLM.url=cleanLlmUrl(contentView.inpLlmUrl.getText());
+            LLM.model=String(contentView.inpLlmModel.getText()||'').trim()||DEFAULT_LLM_MODEL;
+            CFG.maxRedo=clampRedo(contentView.spnMaxRedo.getSelectedItemPosition());
+            CFG.watchdog=!!contentView.chkWatchdog.isChecked();
+            STORE.put('llmUrl',LLM.url===DEFAULT_LLM_URL?'':LLM.url);
+            STORE.put('llmModel',LLM.model===DEFAULT_LLM_MODEL?'':LLM.model);
+            STORE.put('cfgMaxRedo',CFG.maxRedo);
+            STORE.put('cfgWatchdog',CFG.watchdog);
+          }catch(ignore){}
           STORE.put('deepseekKey',KEY);
           STORE.put('visionKey',VISION.key);
           STORE.put('cfgAutoSpeed',CFG.autoSpeed);
@@ -1310,7 +1390,7 @@ function scanUnfinishedChapters(existingView){
           var doneMsg='全课巡检完成！'+buildSessionSummary().replace(/\n/g,' | ');
           cxLog(doneMsg);
           toast(doneMsg);
-          try{if(typeof device!=='undefined'&&device.vibrate)device.vibrate(250);}catch(ignore){}
+          NOTIFY.at=0;notifyUser('全课巡检完成');
           SCRIPT_PAUSED=true;
           updateFloatingStatus('已全部完成，点击继续可重新巡检');
           return true;}
@@ -2144,6 +2224,7 @@ function openReadingTask(todo,v){
     sleep(600);}}
 function ask(item){
   var cacheKey=item.kind+'|'+item.q.replace(/[\s\u00A0]+/g,'')+'|'+(item.blankCount||0)+'|'+item.options.map(function(o){return o.l+':'+String(o.t||'').replace(/[\s\u00A0]+/g,'');}).join('|');
+  item.__cacheKey=cacheKey;
   if(STATE.answerCache&&STATE.answerCache[cacheKey])return noteQuizAsk(cacheKey,STATE.answerCache[cacheKey]);
   if(LOCAL_QB[cacheKey]){
     cxLog('命中本地持久化题库，秒速作答');
@@ -2152,7 +2233,7 @@ function ask(item){
   var visual=!!(item.visualFrames&&item.visualFrames.length&&VISION.key);
   var isChoice=(item.kind==='single'||item.kind==='multiple'||item.kind==='judge');
   var payload={
-    model:'deepseek-chat',
+    model:LLM.model,
     temperature:0.1,
     max_tokens:isChoice?64:320,
     messages:[
@@ -2178,7 +2259,7 @@ function ask(item){
     configureApiKeys(false);
     if(!KEY)throw Error('尚未设置 DeepSeek API Key，请点击悬浮窗【🎛 面板】按钮配置');}
   requireLearningApp();
-  var targetUrl=visual?VISION.url:'https://api.deepseek.com/chat/completions';
+  var targetUrl=visual?VISION.url:LLM.url;
   var reqOpts={headers:{Authorization:'Bearer '+(visual?VISION.key:KEY),'Content-Type':'application/json'},timeout:16000};
   var r;
   try{
@@ -2219,6 +2300,68 @@ function ask(item){
     STATE.answerCache[cacheKey]=answer;
     saveLocalQb(cacheKey,answer);}
   return noteQuizAsk(cacheKey,answer);}
+var QUESTION_HEAD_RE=/^\s*(\d{1,3})\s*(?:[.．、,，·•:：)）]\s*)?(?:必答\s*|选答\s*)?[\[［【(（]?\s*(?:单[选造]|多[选造]|判断)题?\s*[\]］】)）]?/;
+function normStem(text){
+  return String(text||'').replace(/[\s\u00A0]+/g,'').replace(QUESTION_HEAD_RE,'').replace(/^[（(]\d+(?:\.\d+)?分[)）]/,'');}
+function rememberAsked(id,item){
+  var num=Number(String(id).split(':')[0])||0;
+  if(!num||!item.__cacheKey||(item.kind!=='single'&&item.kind!=='multiple'&&item.kind!=='judge'))return;
+  var ctx=STATE.quizContext||'_';
+  if(!STATE.quizAsked||STATE.quizAsked.ctx!==ctx)STATE.quizAsked={ctx:ctx,byNumber:{}};
+  STATE.quizAsked.byNumber[num]={key:item.__cacheKey,kind:item.kind,stem:normStem(item.q),
+    options:item.options.map(function(o){return {l:o.l,t:String(o.t||'')};})};}
+function parseCorrectLetters(raw,rec){
+  var text=String(raw||'').split(/我的答案|答案解析|解析|得分|分值/)[0].replace(/[\s,，、;；.。]+/g,'');
+  if(!text)return null;
+  var letters=null;
+  if(/^[A-Ha-h]+$/.test(text)){
+    letters=text.toUpperCase().split('').filter(function(l,i,arr){return arr.indexOf(l)===i;}).sort();
+  }else if(rec.kind==='judge'){
+    var yes=/^(?:对|正确|√|T|true)$/i.test(text),no=/^(?:错|错误|×|F|false)$/i.test(text);
+    if(!yes&&!no)return null;
+    var hit=rec.options.filter(function(o){return yes?/对|正确|√/.test(o.t):/错|×/.test(o.t);})[0];
+    letters=[hit?hit.l:(yes?'A':'B')];}
+  if(!letters||!letters.length)return null;
+  if(rec.kind!=='multiple'&&letters.length!==1)return null;
+  if(letters.some(function(l){return !rec.options.some(function(o){return o.l===l;});}))return null;
+  return letters;}
+function learnFromResultPage(v){
+  if(!v||!v.n||!/正确答案/.test(v.s))return 0;
+  var asked=STATE.quizAsked;
+  if(!asked||asked.ctx!==(STATE.quizContext||'_'))return 0;
+  var heads=v.n.filter(function(n){return QUESTION_HEAD_RE.test(n.t);}).sort(function(a,b){return a.y-b.y;});
+  var answers=v.n.filter(function(n){return /正确答案/.test(n.t);}).sort(function(a,b){return a.y-b.y;});
+  var learned=0;
+  heads.forEach(function(head,hi){
+    var limit=hi+1<heads.length?heads[hi+1].y:H*2;
+    var mine=answers.filter(function(a){return a.y>head.y&&a.y<limit;});
+    if(mine.length!==1)return;
+    var rec=asked.byNumber[Number(head.t.match(QUESTION_HEAD_RE)[1])];
+    if(!rec||rec.learned)return;
+    var snippet=normStem(head.t);
+    if(snippet.length<6){
+      var below=v.n.filter(function(n){
+        return n.y>head.y+4&&n.y<Math.min(limit,head.y+H*0.09)&&n.t.replace(/\s+/g,'').length>=6&&!/^\s*[A-H]\s*[.．、:：)）]/i.test(n.t)&&!/正确答案|我的答案/.test(n.t);
+      }).sort(function(a,b){return a.y-b.y;})[0];
+      snippet=below?normStem(below.t):'';}
+    if(snippet.length<6||rec.stem.indexOf(snippet.slice(0,8))<0)return;
+    var node=mine[0],raw=node.t.replace(/^[\s\S]*?正确答案\s*[:：]?\s*/,'');
+    if(!raw.trim()){
+      var beside=v.n.filter(function(n){return n!==node&&Math.abs(n.y-node.y)<H*0.012&&n.x>node.x;}).sort(function(a,b){return a.x-b.x;})[0];
+      raw=beside?beside.t:'';}
+    var letters=parseCorrectLetters(raw,rec);
+    if(!letters)return;
+    var verified={answer:letters,confidence:'high',verified:true};
+    STATE.answerCache[rec.key]=verified;
+    LOCAL_QB[rec.key]=verified;
+    if(STATE.redoHints)delete STATE.redoHints[rec.key];
+    rec.learned=true;learned++;});
+  if(learned){
+    var bankKeys=Object.keys(LOCAL_QB);
+    while(bankKeys.length>600)delete LOCAL_QB[bankKeys.shift()];
+    try{STORE.put('localQuestionBank',LOCAL_QB);}catch(ignore){}
+    cxLog('已从结果页学到 '+learned+' 题的正确答案并写入本地题库');}
+  return learned;}
 function answerSummary(ans){
   if(!ans)return '';
   if(Array.isArray(ans.answer)&&ans.answer.length)return ans.answer.join('');
@@ -2236,6 +2379,7 @@ function forgetQuizAnswers(){
   STATE.redoHints=STATE.redoHints||{};
   var count=0,bankChanged=false;
   Object.keys(asked.keys).forEach(function(k){
+    if(LOCAL_QB[k]&&LOCAL_QB[k].verified)return;
     if(asked.keys[k])STATE.redoHints[k]=asked.keys[k];
     if(STATE.answerCache)delete STATE.answerCache[k];
     if(LOCAL_QB[k]){delete LOCAL_QB[k];bankChanged=true;}
@@ -2251,9 +2395,21 @@ function resetQuizRecords(){
   STATE.quizSeek=null;STATE.quizAuditHold=null;STATE.headerSearch=0;STATE.lastFinishAt=0;
   STATE.pagerBackTries={};STATE.pagerBackTarget=0;
   STATE.lastAnswerView=null;STATE.preloadedQuizView=null;}
-var MAX_QUIZ_REDO=2;
 function quizAbandoned(){
   return !!(STATE.quizGaveUp&&STATE.quizGaveUp[STATE.quizContext||'_']);}
+function recoverUnansweredDialog(v){
+  var ctx=STATE.quizContext||'_';
+  STATE.unansweredRecoveries=STATE.unansweredRecoveries||{};
+  var used=STATE.unansweredRecoveries[ctx]||0;
+  if(used>=2)return false;
+  var cancel=cxFind(v,/^(?:取消|继续答题|返回答题|返回作答|去答题|再检查一下)$/);
+  if(!cancel||!cxPress(cancel))return false;
+  STATE.unansweredRecoveries[ctx]=used+1;
+  resetQuizRecords();
+  STATE.awaitingSubmitResult=false;STATE.afterSubmit=false;STATE.quizPending=true;
+  cxLog('学习通提示还有未答题，已取消提交，从头逐题核对并补答（第 '+(used+1)+'/2 次）');
+  sleep(600);
+  return true;}
 function handleQuizNotPassed(v){
   if(!/未达到及格线|未达及格线/.test(v.s))return false;
   if(Date.now()-(STATE.awaitingSubmitAt||0)<3500){sleep(500);return true;}
@@ -2263,9 +2419,9 @@ function handleQuizNotPassed(v){
   var dropped=forgetQuizAnswers();
   resetQuizRecords();
   STATE.awaitingSubmitResult=false;STATE.afterSubmit=false;
-  if(used<MAX_QUIZ_REDO){
+  if(used<CFG.maxRedo){
     STATE.quizRedoCount[ctx]=used+1;STATE.quizPending=true;
-    cxLog('测验未达到及格线，已清除本测验 '+dropped+' 题的答案缓存，开始重做（第 '+(used+1)+'/'+MAX_QUIZ_REDO+' 次）');
+    cxLog('测验未达到及格线，已清除本测验 '+dropped+' 题的答案缓存，开始重做（第 '+(used+1)+'/'+CFG.maxRedo+' 次）');
     var noticeOk=cxFind(v,/^(?:确定|我知道了|知道了)$/);
     var redoBtn=cxFind(v,/^(?:重做|重新作答|重新答题|再做一次)$/)||cxFind(v,/请由此重做/);
     if(noticeOk)cxPress(noticeOk);
@@ -2274,7 +2430,7 @@ function handleQuizNotPassed(v){
     STATE.quizGaveUp=STATE.quizGaveUp||{};STATE.quizGaveUp[ctx]=true;STATE.quizPending=false;
     var failLabel='测验未及格:'+(ctx==='_'?'当前测验':ctx);
     if(SESSION_STATS.skipped.indexOf(failLabel)<0){SESSION_STATS.skipped.push(failLabel);if(SESSION_STATS.skipped.length>30)SESSION_STATS.skipped.shift();}
-    cxLog('测验已重做 '+MAX_QUIZ_REDO+' 次仍未达到及格线，已记录并跳过，请手动处理：'+failLabel);}
+    cxLog((CFG.maxRedo?'测验已重做 '+CFG.maxRedo+' 次仍未达到及格线':'测验未达到及格线（已设置为不自动重做）')+'，已记录并跳过，请手动处理：'+failLabel);}
   sleep(600);
   return true;}
 function bottomPagerCard(v){
@@ -4017,6 +4173,7 @@ function quiz(v){
       var finalId=questionId(item);
       if(finalId)id=finalId;
       STATE.answered[id]=true;
+      rememberAsked(id,item);
       STATE.justAnsweredId=id;
       STATE.lastQuiz='';
       STATE.countedQuizIds=STATE.countedQuizIds||{};if(!STATE.countedQuizIds[id]){STATE.countedQuizIds[id]=true;SESSION_STATS.quizzes++;}
@@ -4764,6 +4921,8 @@ while(true){
     var v=STATE.preloadedQuizView||view();
     STATE.preloadedQuizView=null;
     SMART_RECOGNIZER.analyze(v);
+    learnFromResultPage(v);
+    if(watchdogTick(v))continue;
     if(isDirectoryPage(v)&&!STATE.videoChapterRefresh&&!STATE.discussionRefresh){
       STATE.video=false;STATE.finished=false;STATE.videoExitAt=0;STATE.afterSubmit=false;STATE.quizPending=false;
       if(scanUnfinishedChapters(v)){sleep(200);continue;}}
@@ -4786,6 +4945,7 @@ while(true){
       discussion(v);continue;}
     updateQuizContext(v);
     if(unansweredWarning(v)&&/确定|取消|确认|提交/.test(v.s)){
+      if(recoverUnansweredDialog(v))continue;
       if(Date.now()-STATE.lastLog>12000){STATE.lastLog=Date.now();cxLog('学习通提示漏答，停留检查，不继续确认提交');}
       sleep(1000);continue;}
     if(handleSubmitConfirmation(v))continue;

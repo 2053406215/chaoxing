@@ -1,7 +1,8 @@
-// v6.03 逐题翻页测验回归测试：node test/quiz-pager.test.js
+// 逐题翻页测验回归测试：node test/quiz-pager.test.js
 // 用桩替换 Auto.js 运行时，模拟一份 5 题的翻页测验，驱动脚本内部的 quiz()。
 var fs=require('fs'),path=require('path'),assert=require('assert');
-var src=fs.readFileSync(path.join(__dirname,'..','ChaoxingVideoAssistant-v6.03.js'),'utf8');
+var file=fs.readdirSync(path.join(__dirname,'..')).filter(function(f){return /^ChaoxingVideoAssistant-v6\.\d+\.js$/.test(f);}).sort().pop();
+var src=fs.readFileSync(path.join(__dirname,'..',file),'utf8');
 var cut=src.indexOf('enableBackgroundKeepAlive();\ninitFloatingControlPanel();');
 assert(cut>0,'未找到主循环入口');
 var body=src.slice(0,cut)+'\nglobalThis.__t={quiz:quiz,STATE:STATE,view:view,fill:fillOptionLetters};\n})();';
