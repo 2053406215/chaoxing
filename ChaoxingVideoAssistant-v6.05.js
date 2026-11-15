@@ -1,10 +1,11 @@
-// ChaoxingVideoAssistant-v6.04.js
-// 超星学习通课程助手 v6.04（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// ChaoxingVideoAssistant-v6.05.js
+// 超星学习通课程助手 v6.05（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// v6.05：多门课程排队（面板中开启）；课程“任务”标签不再被误认为章节目录。
 // v6.04：修复 v6.03 的逻辑错误；Root 引擎可用；未及格自动重做；讨论发表核对；
 //        结果页学习正确答案；卡住自动恢复与提醒；漏答弹窗自动补答；答题接口与模型可配置。
 (function(){
 var PKG='com.chaoxing.mobile';
-var APP_VERSION='6.04';
+var APP_VERSION='6.05';
 var STORE=storages.create('chaoxing_assistant_v578');
 var W=Math.min(device.width||1080,device.height||2400);
 var H=Math.max(device.width||1080,device.height||2400);
@@ -183,7 +184,8 @@ function watchdogSignature(){
   return [SESSION_STATS.videos,SESSION_STATS.quizzes,SESSION_STATS.discussions,SESSION_STATS.docs,SESSION_STATS.skipped.length,
     STATE.lastTime,STATE.quizContext||'',Object.keys(STATE.answered||{}).length,STATE.lastPagerNumber||0,RESUME_CHAPTER,
     STATE.dirSweepCount||0,Object.keys(STATE.dirRowVisits||{}).length,STATE.lastDirSig||'',
-    STATE.quizRedoCount?JSON.stringify(STATE.quizRedoCount):''].join('|');}
+    STATE.quizRedoCount?JSON.stringify(STATE.quizRedoCount):'',
+    STATE.courseQueue?[Object.keys(STATE.courseQueue.done).length,Object.keys(STATE.courseQueue.skipText).length,STATE.courseQueue.sig,STATE.courseQueue.pending?STATE.courseQueue.pending.name:''].join(','):''].join('|');}
 function watchdogTick(v){
   if(!CFG.watchdog)return false;
   var nowW=Date.now(),sig=watchdogSignature();
@@ -207,7 +209,7 @@ function watchdogTick(v){
   STATE.taskTopReady=false;STATE.taskTopSignature='';STATE.chapterFullScanDone=false;STATE.lastAnswerView=null;STATE.preloadedQuizView=null;
   cxLog('看门狗：'+mins+' 分钟没有进展，退回上一级重新定位（'+WATCHDOG.recoveries+'/2）');
   notifyUser('脚本卡住 '+mins+' 分钟，已尝试自动恢复');
-  if(!isDirectoryPage(v)){safeBack();sleep(800);}
+  if(!isDirectoryPage(v)&&!isCourseListPage(v)){safeBack();sleep(800);}
   return true;}
 function buildDiagnosticReport(){
   var mode=NO_AX_BACKEND||(typeof auto!=='undefined'&&auto&&auto.service?'accessibility':'none');
@@ -291,7 +293,8 @@ var CFG={
   skipDiscussion:STORE.get('cfgSkipDiscussionV2',false)===true,
   onlyVideoQuiz:STORE.get('cfgOnlyVideoQuizV2',false)===true,
   maxRedo:clampRedo(STORE.get('cfgMaxRedo',2)),
-  watchdog:STORE.get('cfgWatchdog',true)!==false};
+  watchdog:STORE.get('cfgWatchdog',true)!==false,
+  multiCourse:STORE.get('cfgMultiCourse',false)===true};
 function clampRedo(value){
   var n=Number(value);
   if(!(n>=0))n=2;
@@ -532,6 +535,7 @@ function openVisualControlCenter(isInitial){
                   '<checkbox id="chkAutoReturn" text="后台挂机视频播完自动拉回学习通" checked="'+CFG.autoReturnFg+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
                   '<checkbox id="chkSkipDisc" text="仅做视频与测验（不勾选则自动做讨论题与秒点PDF文档）" checked="'+CFG.onlyVideoQuiz+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
                   '<checkbox id="chkWatchdog" text="卡住 4 分钟自动退回重新定位，并震动提醒" checked="'+CFG.watchdog+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
+                  '<checkbox id="chkMultiCourse" text="多门课程排队（一门巡检完自动返回课程列表做下一门）" checked="'+CFG.multiCourse+'" textColor="#F1F5F9" textSize="12sp" marginTop="4dp"/>'+
                   '<horizontal gravity="center_vertical" marginTop="4dp">'+
                     '<text text="测验未及格自动重做次数:" textColor="#F1F5F9" textSize="12sp" layout_weight="1"/>'+
                     '<spinner id="spnMaxRedo" entries="0 次|1 次|2 次|3 次|4 次|5 次" textColor="#38BDF8"/>'+
@@ -602,6 +606,8 @@ function openVisualControlCenter(isInitial){
             LLM.model=String(contentView.inpLlmModel.getText()||'').trim()||DEFAULT_LLM_MODEL;
             CFG.maxRedo=clampRedo(contentView.spnMaxRedo.getSelectedItemPosition());
             CFG.watchdog=!!contentView.chkWatchdog.isChecked();
+            CFG.multiCourse=!!contentView.chkMultiCourse.isChecked();
+            STORE.put('cfgMultiCourse',CFG.multiCourse);
             STORE.put('llmUrl',LLM.url===DEFAULT_LLM_URL?'':LLM.url);
             STORE.put('llmModel',LLM.model===DEFAULT_LLM_MODEL?'':LLM.model);
             STORE.put('cfgMaxRedo',CFG.maxRedo);
@@ -1249,8 +1255,124 @@ function findDirectoryChapterRows(v){
         rows.push({num:num,t:num+' '+titlePart,x:Math.round(W*0.48),y:n.y,node:n.node});}}});
   rows.sort(function(a,b){return a.y-b.y;});
   return rows;}
+function isCourseTaskTab(v){
+  if(!v||!v.n)return false;
+  function tab(re){return v.n.some(function(n){return re.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;});}
+  if(!tab(/^任务$/)||!tab(/^章节$/))return false;
+  if(/说明.*章节中阅读|说明.*有效阅读时长|计入有效/.test(v.s))return false;
+  if(findDirectoryChapterRows(v).length)return false;
+  return v.n.some(function(n){return /^(?:作业\/考试|作业|考试|讨论)$/.test(n.t.trim())&&n.y>H*0.17&&n.y<H*0.5&&n.x<W*0.5;});}
+function isCourseListPage(v){
+  if(!v||!v.n)return false;
+  if(!v.n.some(function(n){return /^课程$/.test(n.t.trim())&&n.y<H*0.11&&n.x>W*0.3&&n.x<W*0.7;}))return false;
+  return !v.n.some(function(n){return /^(?:任务|章节)$/.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;});}
+function readCourseTitle(v){
+  var found=v.n.filter(function(n){
+    return n.y<H*0.11&&n.x>W*0.25&&n.x<W*0.75&&n.t.trim().length>=2&&!/^(?:客服|课程)$/.test(n.t.trim());
+  }).sort(function(a,b){return b.t.length-a.t.length;})[0];
+  return found?found.t.trim():'';}
+function normCourse(text){
+  return String(text||'').replace(/[\s\u00A0]+/g,'').replace(/（/g,'(').replace(/）/g,')').replace(/(?:…|\.{3})$/,'');}
+function courseQueue(){
+  if(!STATE.courseQueue)STATE.courseQueue={done:{},skipText:{},pending:null,current:'',alias:'',still:0,sig:'',up:false,passes:0};
+  return STATE.courseQueue;}
+function courseDone(name){
+  var q=courseQueue(),n=normCourse(name);
+  if(!n||q.skipText[n])return true;
+  return Object.keys(q.done).some(function(d){
+    return d===n||(Math.min(d.length,n.length)>=6&&(d.indexOf(n)===0||n.indexOf(d)===0));});}
+function courseCards(v){
+  var lines=v.n.filter(function(n){
+    var t=n.t.trim();
+    return n.y>H*0.115&&n.y<H*0.97&&n.x>W*0.08&&n.x<W*0.88&&t.length>=2&&!/^(?:全部学期|智慧课程)$/.test(t);
+  }).sort(function(a,b){return a.y-b.y||a.x-b.x;});
+  var cards=[],cur=null;
+  lines.forEach(function(n){
+    if(!cur||n.y-cur.lastY>W*0.143){cur={y:n.y,lastY:n.y,lines:[]};cards.push(cur);}
+    cur.lastY=n.y;cur.lines.push(n);});
+  cards.forEach(function(card){
+    var head=card.lines.filter(function(n){return n.x>W*0.2&&n.y-card.y<W*0.07;})[0]||card.lines[0];
+    card.y=head.y;
+    card.name=normCourse(head.t.replace(/[✨\s]*智慧课程\s*$/,''));});
+  return cards.filter(function(card){
+    return card.name.length>=2&&!/^\d{4}-\d{4}学年|^开课时间|^结课时间|学期$/.test(card.name);});}
+function resetCourseState(){
+  resetQuizRecords();
+  STATE.dirRowVisits={};STATE.dirSweepCount=0;STATE.dirScrollStill=0;STATE.dirScrollUp=false;STATE.lastDirSig='';
+  STATE.videoFinishedKeys={};STATE.chapterQuizCompleted={};STATE.quizGaveUp={};STATE.quizRedoCount={};STATE.unansweredRecoveries={};STATE.quizIdleTries={};
+  STATE.quizContext='';STATE.workChapter=null;STATE.lastKnownChapterHeading=null;STATE.quizPending=false;STATE.afterSubmit=false;
+  STATE.video=false;STATE.finished=false;STATE.discussionDone={};
+  RESUME_CHAPTER='';try{STORE.put('resumeChapterNum','');}catch(ignore){}}
+function pickNextCourse(v){
+  var q=courseQueue(),nowQ=Date.now();
+  if(q.pending){
+    if(nowQ-q.pending.at<4000){sleep(500);return true;}
+    q.tapFails=q.tapFails||{};
+    q.tapFails[q.pending.name]=(q.tapFails[q.pending.name]||0)+1;
+    if(q.tapFails[q.pending.name]>=2){q.skipText[q.pending.name]=true;cxLog('课程《'+q.pending.name+'》点击两次都没有进入，跳过');}
+    q.pending=null;}
+  var target=courseCards(v).filter(function(card){return card.y<H*0.93&&!courseDone(card.name);})[0];
+  if(target&&!q.up){
+    if(!tap(Math.round(W*0.5),target.y))return false;
+    q.pending={name:target.name,at:nowQ};
+    q.still=0;q.sig='';
+    resetCourseState();
+    cxLog('课程排队：进入《'+target.name+'》');
+    sleep(900);
+    return true;}
+  var sig=quizViewportSignature(v);
+  q.still=sig===q.sig?q.still+1:0;
+  q.sig=sig;
+  if(q.still>=2){
+    q.still=0;q.sig='';
+    if(q.up){q.up=false;return true;}
+    q.passes++;
+    if(q.passes<2){q.up=true;cxLog('课程排队：已到列表底部，回到顶部复查一遍');return true;}
+    var allDone='全部课程巡检完成！共 '+Object.keys(q.done).length+' 门 | '+buildSessionSummary().replace(/\n/g,' | ');
+    STATE.courseQueue=null;
+    cxLog(allDone);
+    NOTIFY.at=0;notifyUser('全部课程巡检完成');
+    SCRIPT_PAUSED=true;
+    updateFloatingStatus('全部课程已完成，点击继续可重新巡检');
+    return true;}
+  if(q.up)doSwipe(Math.round(W*0.5),Math.round(H*0.36),Math.round(W*0.5),Math.round(H*0.74),320);
+  else doSwipe(Math.round(W*0.5),Math.round(H*0.74),Math.round(W*0.5),Math.round(H*0.36),320);
+  sleep(450);
+  return true;}
+function handleCourseQueue(v){
+  if(isCourseTaskTab(v)&&(STATE.taskTabSwitches||0)<4){
+    STATE.taskTabSwitches=(STATE.taskTabSwitches||0)+1;
+    var chapterTab=v.n.filter(function(n){return /^章节$/.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;})[0];
+    if(chapterTab&&(cxPress(chapterTab)||tap(chapterTab.x,chapterTab.y))){
+      cxLog('当前在课程的“任务”标签，切换到“章节”');
+      sleep(700);
+      return true;}}
+  else if(!isCourseTaskTab(v))STATE.taskTabSwitches=0;
+  if(!CFG.multiCourse)return false;
+  var q=courseQueue();
+  if(isCourseListPage(v))return pickNextCourse(v);
+  if(!q.pending)return false;
+  if(isDirectoryPage(v)){
+    var title=normCourse(readCourseTitle(v))||q.pending.name;
+    if(courseDone(title)){
+      q.skipText[q.pending.name]=true;q.pending=null;
+      safeBack();sleep(800);
+      return true;}
+    q.current=title;q.alias=q.pending.name;q.pending=null;
+    cxLog('课程排队：已进入《'+title+'》，开始巡检章节');
+    return false;}
+  if(Date.now()-q.pending.at>25000){
+    var emptyLabel='课程无章节:'+q.pending.name.slice(0,14);
+    if(SESSION_STATS.skipped.indexOf(emptyLabel)<0){SESSION_STATS.skipped.push(emptyLabel);if(SESSION_STATS.skipped.length>30)SESSION_STATS.skipped.shift();}
+    cxLog('课程《'+q.pending.name+'》进入后 25 秒没有出现章节目录，已记录并跳过');
+    q.skipText[q.pending.name]=true;q.pending=null;
+    safeBack();sleep(800);
+    return true;}
+  sleep(500);
+  return true;}
 function isDirectoryPage(v){
   if(!v||!v.n)return false;
+  if(isCourseTaskTab(v))return false;
   if(v.n.some(function(n){return /^讨论$/.test(n.t.trim())&&n.y<H*0.12&&n.x>W*0.75;}))return false;
   if(/上一节|下一节|下一讲|观看时长|完成条件|未完成任务点前|任务点已完成|写笔记|章节测验|本次得分|最终得分|我的答案|正确答案|单选题|多选题|判断题|填空题/.test(v.s))return false;
   if(v.n.some(function(n){return /^任务点/.test(n.t.trim())&&n.x<W*0.35;}))return false;
@@ -1387,6 +1509,15 @@ function scanUnfinishedChapters(existingView){
         STATE.dirSweepCount=(STATE.dirSweepCount||0)+1;
         if(STATE.dirSweepCount>=2){
           STATE.dirSweepCount=0;
+          if(CFG.multiCourse){
+            var cq=courseQueue(),doneTitle=normCourse(readCourseTitle(v)||cq.current||'');
+            if(doneTitle)cq.done[doneTitle]=true;
+            if(cq.alias)cq.skipText[cq.alias]=true;
+            cq.current='';cq.alias='';cq.pending=null;cq.still=0;cq.sig='';
+            cxLog('课程排队：《'+(doneTitle||'当前课程')+'》巡检完成，返回课程列表做下一门');
+            resetCourseState();
+            safeBack();sleep(900);
+            return true;}
           var doneMsg='全课巡检完成！'+buildSessionSummary().replace(/\n/g,' | ');
           cxLog(doneMsg);
           toast(doneMsg);
@@ -4923,6 +5054,7 @@ while(true){
     SMART_RECOGNIZER.analyze(v);
     learnFromResultPage(v);
     if(watchdogTick(v))continue;
+    if(handleCourseQueue(v))continue;
     if(isDirectoryPage(v)&&!STATE.videoChapterRefresh&&!STATE.discussionRefresh){
       STATE.video=false;STATE.finished=false;STATE.videoExitAt=0;STATE.afterSubmit=false;STATE.quizPending=false;
       if(scanUnfinishedChapters(v)){sleep(200);continue;}}
