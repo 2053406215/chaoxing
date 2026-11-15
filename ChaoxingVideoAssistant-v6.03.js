@@ -2,6 +2,7 @@
 // 超星学习通课程助手 v6.03（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
 (function(){
 var PKG='com.chaoxing.mobile';
+var APP_VERSION='6.03';
 var STORE=storages.create('chaoxing_assistant_v578');
 var W=Math.min(device.width||1080,device.height||2400);
 var H=Math.max(device.width||1080,device.height||2400);
@@ -14,6 +15,7 @@ var SCRIPT_PAUSED=false;
 var PERM_GUIDE_SHOWN=false;
 var NO_AX_BACKEND='';
 var SHIZUKU_REQ_TRIED=false;
+var ROOT_PROBE={ok:false,at:0};
 var SCREEN_CAPTURE_READY=false;
 var WAKE_LOCK=null,WIFI_LOCK=null,FLOAT_WIN=null;
 var RECENT_LOGS=[];
@@ -161,7 +163,7 @@ function buildDiagnosticReport(){
   var mode=NO_AX_BACKEND||(typeof auto!=='undefined'&&auto&&auto.service?'accessibility':'none');
   var ansKeys=Object.keys(STATE.answered||{}).filter(function(k){return STATE.answered[k];});
   var header=[
-    '=== 超星助手 v6.14 诊断日志 ===',
+    '=== 超星助手 v'+APP_VERSION+' 诊断日志 ===',
     '时间: '+new Date().toLocaleString(),
     '引擎: '+mode+' | 截图就绪: '+SCREEN_CAPTURE_READY+' | 分辨率: '+W+'x'+H+' | 横屏: '+land(),
     '场景: '+SMART_RECOGNIZER.scene+' ('+SMART_RECOGNIZER.label+') | 章节: '+(STATE.quizContext||'无'),
@@ -427,7 +429,7 @@ function openVisualControlCenter(isInitial){
                   '<horizontal gravity="center_vertical">'+
                     '<vertical layout_weight="1">'+
                       '<text text="✨ 超星学习通智能助手 Pro" textColor="#38BDF8" textSize="17sp" textStyle="bold"/>'+
-                      '<text id="dlgSub" text="v6.14 极速旗舰版 · 免无障碍自适应双引擎" textColor="#94A3B8" textSize="11sp" marginTop="2dp"/>'+
+                      '<text id="dlgSub" text="v'+APP_VERSION+' 极速旗舰版 · 免无障碍自适应双引擎" textColor="#94A3B8" textSize="11sp" marginTop="2dp"/>'+
                     '</vertical>'+
                     '<text text="'+stateLabel+'" textColor="#090D16" bg="'+stateBg+'" textSize="10sp" textStyle="bold" padding="6dp"/>'+
                   '</horizontal>'+
@@ -681,8 +683,23 @@ function detectShellBackend(){
           NO_AX_BACKEND='shizuku';
           return 'shizuku';}}}
   }catch(ignore){}
+  if(probeRootShell()){
+    NO_AX_BACKEND='root';
+    return 'root';}
   NO_AX_BACKEND='';
   return '';}
+function probeRootShell(){
+  if(ROOT_PROBE.ok)return true;
+  var nowRoot=Date.now();
+  if(ROOT_PROBE.at&&nowRoot-ROOT_PROBE.at<60000)return false;
+  ROOT_PROBE.at=nowRoot;
+  try{
+    if(typeof shell!=='function')return false;
+    var probe=shell('id',true);
+    ROOT_PROBE.ok=!!(probe&&probe.code===0&&/uid=0\b/.test(String(probe.result||'')));
+  }catch(ignore){ROOT_PROBE.ok=false;}
+  if(ROOT_PROBE.ok)cxLog('已获得 Root 授权，启用 Root 免无障碍引擎');
+  return ROOT_PROBE.ok;}
 function getExecutionMode(){
   try{
     if(typeof auto!=='undefined'&&auto&&auto.service){
@@ -2127,11 +2144,11 @@ function openReadingTask(todo,v){
     sleep(600);}}
 function ask(item){
   var cacheKey=item.kind+'|'+item.q.replace(/[\s\u00A0]+/g,'')+'|'+(item.blankCount||0)+'|'+item.options.map(function(o){return o.l+':'+String(o.t||'').replace(/[\s\u00A0]+/g,'');}).join('|');
-  if(STATE.answerCache&&STATE.answerCache[cacheKey])return STATE.answerCache[cacheKey];
+  if(STATE.answerCache&&STATE.answerCache[cacheKey])return noteQuizAsk(cacheKey,STATE.answerCache[cacheKey]);
   if(LOCAL_QB[cacheKey]){
     cxLog('命中本地持久化题库，秒速作答');
     STATE.answerCache[cacheKey]=LOCAL_QB[cacheKey];
-    return LOCAL_QB[cacheKey];}
+    return noteQuizAsk(cacheKey,LOCAL_QB[cacheKey]);}
   var visual=!!(item.visualFrames&&item.visualFrames.length&&VISION.key);
   var isChoice=(item.kind==='single'||item.kind==='multiple'||item.kind==='judge');
   var payload={
@@ -2148,6 +2165,8 @@ function ask(item){
         content:'题型：'+item.kind+(item.blankCount?'（本题在页面上共有严格 '+item.blankCount+' 个填空输入框，即第1空至第'+item.blankCount+'空！注意 OCR 提取的题干可能漏掉并列顿号（如“在___、___、___等”3个并列空）或句末空缺，你必须对照教材原文逐空还原全部 '+item.blankCount+' 个空缺，严禁把题干中已给出的酶名/名词（如“再在胆绿素还原酶催化下生成___”中的胆绿素还原酶）错当成填空答案，返回的 blanks 数组长度必须严格等于 '+item.blankCount+'，逐空一一对应！）':'')+'\n题干：'+item.q+'\n选项：\n'+
           item.options.map(function(o){return o.l+'. '+o.t;}).join('\n')}
     ]};
+  var redoHint=STATE.redoHints&&STATE.redoHints[cacheKey];
+  if(redoHint)payload.messages[1].content+='\n注意：上一次整份测验未达到及格线（不代表本题一定答错）。本题上次提交的答案是：'+redoHint+'。请重新独立审题，确认无误后作答。';
   if(visual){
     payload.model=VISION.model;delete payload.thinking;
     payload.messages[0].content+=' 图片按本题从上到下排列，只解答所给题号。先完整读取题干和所有选项，计算题先独立计算，再逐项核对选项实际写出的指标名称、单位和数值，不能按题干列举顺序交换指标含义。图片不清楚或缺少必要内容时返回 confidence=low，不猜测。';
@@ -2199,7 +2218,65 @@ function ask(item){
   if(String(answer.confidence||'').toLowerCase()!=='low'){
     STATE.answerCache[cacheKey]=answer;
     saveLocalQb(cacheKey,answer);}
-  return answer;}
+  return noteQuizAsk(cacheKey,answer);}
+function answerSummary(ans){
+  if(!ans)return '';
+  if(Array.isArray(ans.answer)&&ans.answer.length)return ans.answer.join('');
+  if(Array.isArray(ans.blanks)&&ans.blanks.length)return ans.blanks.join('；').slice(0,80);
+  return String(ans.text||'').slice(0,60);}
+function noteQuizAsk(cacheKey,ans){
+  if(cacheKey.indexOf('short|讨论题。')===0)return ans;
+  var ctx=STATE.quizContext||'_';
+  if(!STATE.quizAskLog||STATE.quizAskLog.ctx!==ctx)STATE.quizAskLog={ctx:ctx,keys:{}};
+  STATE.quizAskLog.keys[cacheKey]=answerSummary(ans);
+  return ans;}
+function forgetQuizAnswers(){
+  var asked=STATE.quizAskLog;
+  if(!asked||asked.ctx!==(STATE.quizContext||'_'))return 0;
+  STATE.redoHints=STATE.redoHints||{};
+  var count=0,bankChanged=false;
+  Object.keys(asked.keys).forEach(function(k){
+    if(asked.keys[k])STATE.redoHints[k]=asked.keys[k];
+    if(STATE.answerCache)delete STATE.answerCache[k];
+    if(LOCAL_QB[k]){delete LOCAL_QB[k];bankChanged=true;}
+    count++;});
+  if(bankChanged){try{STORE.put('localQuestionBank',LOCAL_QB);}catch(ignore){}}
+  asked.keys={};
+  return count;}
+function resetQuizRecords(){
+  STATE.answered={};STATE.scanDrafts={};STATE.scanFailures={};STATE.shortAttempted={};STATE.shortSaved={};
+  STATE.choiceAttempted={};STATE.multipleConfirmed={};STATE.multipleExpected={};STATE.multipleFailures={};STATE.backtrackTries={};STATE.pageRecheckCount={};
+  STATE.auditMissing=[];STATE.auditRecoverySteps=0;STATE.auditRecoverySignature='';STATE.auditRecoveryStill=0;
+  STATE.workTotal=0;STATE.blocked='';STATE.navBlocked='';STATE.lastQuiz='';STATE.justAnsweredId='';
+  STATE.quizSeek=null;STATE.quizAuditHold=null;STATE.headerSearch=0;STATE.lastFinishAt=0;
+  STATE.pagerBackTries={};STATE.pagerBackTarget=0;
+  STATE.lastAnswerView=null;STATE.preloadedQuizView=null;}
+var MAX_QUIZ_REDO=2;
+function quizAbandoned(){
+  return !!(STATE.quizGaveUp&&STATE.quizGaveUp[STATE.quizContext||'_']);}
+function handleQuizNotPassed(v){
+  if(!/未达到及格线|未达及格线/.test(v.s))return false;
+  if(Date.now()-(STATE.awaitingSubmitAt||0)<3500){sleep(500);return true;}
+  var ctx=STATE.quizContext||'_';
+  STATE.quizRedoCount=STATE.quizRedoCount||{};
+  var used=STATE.quizRedoCount[ctx]||0;
+  var dropped=forgetQuizAnswers();
+  resetQuizRecords();
+  STATE.awaitingSubmitResult=false;STATE.afterSubmit=false;
+  if(used<MAX_QUIZ_REDO){
+    STATE.quizRedoCount[ctx]=used+1;STATE.quizPending=true;
+    cxLog('测验未达到及格线，已清除本测验 '+dropped+' 题的答案缓存，开始重做（第 '+(used+1)+'/'+MAX_QUIZ_REDO+' 次）');
+    var noticeOk=cxFind(v,/^(?:确定|我知道了|知道了)$/);
+    var redoBtn=cxFind(v,/^(?:重做|重新作答|重新答题|再做一次)$/)||cxFind(v,/请由此重做/);
+    if(noticeOk)cxPress(noticeOk);
+    else if(redoBtn)cxPress(redoBtn);
+  }else{
+    STATE.quizGaveUp=STATE.quizGaveUp||{};STATE.quizGaveUp[ctx]=true;STATE.quizPending=false;
+    var failLabel='测验未及格:'+(ctx==='_'?'当前测验':ctx);
+    if(SESSION_STATS.skipped.indexOf(failLabel)<0){SESSION_STATS.skipped.push(failLabel);if(SESSION_STATS.skipped.length>30)SESSION_STATS.skipped.shift();}
+    cxLog('测验已重做 '+MAX_QUIZ_REDO+' 次仍未达到及格线，已记录并跳过，请手动处理：'+failLabel);}
+  sleep(600);
+  return true;}
 function bottomPagerCard(v){
   var nav=cxFind(v,/下一题|上一题|答题卡/,H*.48);
   if(!nav)return null;
@@ -2218,7 +2295,7 @@ function isDiscussionDetailView(v){
 function questions(v){
   if(!v||!v.n)return [];
   if(v._questions)return v._questions;
-  if(isDiscussionDetailView(v)||isDirectoryPage(v))return (v._questions=[]);
+  if(isDiscussionDetailView(v)||isDirectoryPage(v)||quizAbandoned())return (v._questions=[]);
   STATE.chapterQuizCompleted=STATE.chapterQuizCompleted||{};
   var hasRedo=/请由此重做|待重做|未达到及格线|由此作答|开始测验/.test(v.s);
   var hasActivePagerOrSubmit=!!bottomPagerCard(v)||!!cxFind(v,/^\s*(?:提\s*交(?:答案|测验|作业)?|交\s*卷|下一题|答题卡)\s*$/,H*0.13);
@@ -2721,9 +2798,10 @@ function submitWorkIfComplete(v,lastId){
     STATE.quizPending=true;
     cxLog('学习通明确提示未答题，停止确认提交并停留检查');
   }else if(submissionFailed(result)){
-    STATE.awaitingSubmitResult=false;
     STATE.quizPending=true;
-    cxLog('学习通提示未及格或提交失败，保留当前页面，停止重复提交，请核对答案');
+    if(!/未达到及格线|未达及格线/.test(result.s)){
+      STATE.awaitingSubmitResult=false;
+      cxLog('学习通提示提交失败，保留当前页面，停止重复提交，请核对');}
   }else cxLog('已点击提交，但页面未确认提交成功，请核对');
   return true;}
 function advanceQuestion(v,fromId){
@@ -3773,6 +3851,7 @@ function updateQuizContext(v){
     STATE.lastAnswerView=null;STATE.preloadedQuizView=null;STATE.headerSearch=0;STATE.quizPending=false;
     STATE.chapterFullScanDone=false;
     cxLog('章节已变化，已清空上一节作答记录');}
+  if(STATE.quizContext!==key&&STATE.quizGaveUp)delete STATE.quizGaveUp._;
   STATE.quizContext=key;}
 function recoverMissingQuestion(v){
   if(!STATE.auditMissing||!STATE.auditMissing.length)return false;
@@ -4100,7 +4179,7 @@ function continueAfterSubmit(v){
   sleep(320);}
 function handleSubmitConfirmation(v){
   if(!/确认提交|确定提交|是否提交|确认交卷|确定交卷/.test(v.s))return false;
-  if(submissionFailed(v)||unansweredWarning(v))return false;
+  if(/提交失败|提交出错/.test(v.s)||unansweredWarning(v))return false;
   var yes=cxFind(v,/^(确定|确认|确认提交|确认交卷|继续提交)$/);
   if(!yes)return false;
   if(tap(yes.x,yes.y)){STATE.awaitingSubmitResult=true;STATE.awaitingSubmitAt=Date.now();cxLog('已点击提交确认');sleep(350);}
@@ -4298,6 +4377,9 @@ function chapter(v){
       STATE.chapterQuizCompleted[STATE.quizContext]=true;
       STATE.quizPending=false;}
     if(tk.done||STATE.videoFinishedKeys[tk.key]||(tk.kind==='discussion'&&STATE.discussionDone&&STATE.discussionDone[tk.key]))continue;
+    if(tk.kind==='quiz'&&quizAbandoned()){
+      STATE.videoFinishedKeys[tk.key]=true;
+      continue;}
     if(tk.kind==='survey'||tk.kind==='other'){
       STATE.videoFinishedKeys[tk.key]=true;
       var otherDesc=String(tk.text||'').replace(/\|+/g,' ').trim().slice(0,28)||tk.key.slice(0,28);
@@ -4357,11 +4439,26 @@ function chapter(v){
       return;}
     if(todo.kind==='quiz'){
       STATE.afterSubmit=false;
+      STATE.quizIdleTries=STATE.quizIdleTries||{};
+      var idleKey=(STATE.quizContext||'')+'|'+todo.key;
       if(questions(v).length){
+        delete STATE.quizIdleTries[idleKey];
         quiz(v);
         return;}
       var entry=todo.nodes.filter(function(n){return /开始测验|开始作业|开始答题|进入测验|继续答题|由此作答|请由此重做|去填写/.test(n.t);})[0];
-      if(entry&&cxPress(entry)){sleep(650);return;}
+      if(entry&&cxPress(entry)){delete STATE.quizIdleTries[idleKey];sleep(650);return;}
+      var quizKnownDone=!!(STATE.quizContext&&STATE.chapterQuizCompleted[STATE.quizContext]);
+      STATE.quizIdleTries[idleKey]=(STATE.quizIdleTries[idleKey]||0)+1;
+      if(STATE.quizIdleTries[idleKey]>=(quizKnownDone?3:6)){
+        delete STATE.quizIdleTries[idleKey];
+        STATE.videoFinishedKeys[todo.key]=true;STATE.quizPending=false;
+        if(quizKnownDone){
+          cxLog('本章测验已确认完成，任务点标记未刷新，不再重复查找');
+        }else{
+          var idleLabel='测验未识别:'+(STATE.quizContext||todo.key.slice(0,14));
+          if(SESSION_STATS.skipped.indexOf(idleLabel)<0){SESSION_STATS.skipped.push(idleLabel);if(SESSION_STATS.skipped.length>30)SESSION_STATS.skipped.shift();}
+          cxLog('测验任务点多次未找到题目或入口，已记录并跳过：'+idleLabel);}
+        return;}
       swipeChapterTasks(false);
       sleep(260);
       return;}
@@ -4490,21 +4587,45 @@ function discussion(v){
   var topic=STATE.discussionTopic;
   var records=STORE.get('discussionReplies',{})||{},record=records[topic.key];
   function persist(value){records[topic.key]=value;STORE.put('discussionReplies',records);}
-  function finish(){
-    if(STATE.discussionTaskKey){if(!STATE.discussionDone[STATE.discussionTaskKey])SESSION_STATS.discussions++;STATE.discussionDone[STATE.discussionTaskKey]=true;STATE.videoFinishedKeys=STATE.videoFinishedKeys||{};STATE.videoFinishedKeys[STATE.discussionTaskKey]=true;}
+  function finish(confirmed){
+    if(STATE.discussionTaskKey){if(confirmed&&!STATE.discussionDone[STATE.discussionTaskKey])SESSION_STATS.discussions++;STATE.discussionDone[STATE.discussionTaskKey]=true;STATE.videoFinishedKeys=STATE.videoFinishedKeys||{};STATE.videoFinishedKeys[STATE.discussionTaskKey]=true;}
     STATE.discussionTopic=null;STATE.taskTopReady=false;STATE.taskTopSignature='';
-    safeBack();sleep(650);cxLog('讨论发表已确认，返回章节核对任务点');
+    safeBack();sleep(650);cxLog(confirmed?'讨论发表已确认，返回章节核对任务点':'讨论发表结果未确认，返回章节继续其他任务点');
     var afterBack=view();
     if(!isChapterContent(afterBack))refreshDiscussionChapter(afterBack);}
+  function pressSend(page){
+    var sendBtn=cxId(PKG+':id/btnSubmit').findOnce()||cxFind(page,/^(?:发布|发送|提交|完成|发表)$/,H*0.35);
+    if(sendBtn&&typeof sendBtn.click==='function'){
+      var sendClicked=false,sendBounds=null;
+      try{sendClicked=!!sendBtn.click();}catch(ignore){}
+      if(!sendClicked){
+        try{sendBounds=sendBtn.bounds();}catch(ignore){}
+        tap(sendBounds?sendBounds.centerX():Math.round(W*0.91),sendBounds?sendBounds.centerY():Math.round(H*0.62));}}
+    else if(sendBtn)tap(sendBtn.x,sendBtn.y);
+    else tap(Math.round(W*0.91),Math.round(H*0.62));}
   if(record){
-    if(record.status==='posted'){cxLog('此讨论已有本脚本的发表记录，避免重复回答');finish();return;}
+    if(record.status==='posted'){cxLog('此讨论已有本脚本的发表记录，避免重复回答');finish(true);return;}
+    if(record.status==='unverified'){cxLog('此讨论上次发表后未能核对结果，为避免重复不再发送，请手动检查');finish(false);return;}
     var probe=String(record.text||'').replace(/\s+/g,'').slice(0,12);
-    var found=probe.length>=4&&v.n.some(function(n){
+    var draftOpen=false;
+    try{
+      var draftBox=cxId(PKG+':id/etReplyText').findOnce()||cxClassName('android.widget.EditText').findOnce();
+      draftOpen=!!(draftBox&&probe.length>=4&&String(draftBox.text()||'').replace(/\s+/g,'').indexOf(probe)>=0);
+    }catch(e){if(String(e).indexOf('CX_BACKGROUND_PAUSED')>=0||String(e).indexOf('CX_ACCESSIBILITY_PAUSED')>=0)throw e;}
+    var found=!draftOpen&&probe.length>=4&&v.n.some(function(n){
       return n.t.replace(/\s+/g,'').indexOf(probe)>=0&&n!==nativeField(v,'etReplyText');});
-    if(found||/发表成功|评论成功|回复成功/.test(v.s)){
-      record.status='posted';persist(record);finish();return;}
+    if(found||/发表成功|评论成功|回复成功|发布成功/.test(v.s)){
+      record.status='posted';persist(record);finish(true);return;}
     if(Date.now()-(record.at||0)>12000){
-      record.status='posted';persist(record);finish();return;}
+      if(draftOpen&&(record.tries||1)<2){
+        record.tries=(record.tries||1)+1;record.at=Date.now();persist(record);
+        cxLog('讨论回复仍停留在输入框，发送未生效，再点一次发送');
+        requireLearningApp();pressSend(v);sleep(700);closeKeyboardSafely();return;}
+      record.status='unverified';persist(record);
+      var discLabel='讨论待核对:'+topic.key.slice(0,14);
+      if(SESSION_STATS.skipped.indexOf(discLabel)<0){SESSION_STATS.skipped.push(discLabel);if(SESSION_STATS.skipped.length>30)SESSION_STATS.skipped.shift();}
+      cxLog('讨论已点发送，但页面上未能核对到回复内容；不再重复发送，请手动检查');
+      finish(false);return;}
     if(Date.now()-STATE.lastLog>10000){STATE.lastLog=Date.now();cxLog('讨论已尝试发表，等待结果核对，不重复发送');}
     sleep(700);return;}
   var personal=/你所遇到|你的.{0,8}经历|你曾|分享.{0,8}(?:亲身|个人|经历)|自己.{0,8}经历/.test(topic.q);
@@ -4537,9 +4658,8 @@ function discussion(v){
         try{sentOk=!!send.click();}catch(ignore){}
         if(!sentOk)sentOk=cxPress({node:send,x:send.bounds().centerX(),y:send.bounds().centerY()});
         if(sentOk){
-          persist({status:'posted',text:answer,at:Date.now()});
-          cxLog('讨论回答已填写，已点击一次发表');sleep(700);
-          finish();
+          persist({status:'pending',text:answer,at:Date.now(),tries:1});
+          cxLog('讨论回答已填写，已点击一次发表，等待核对结果');sleep(700);
           return;}}}}
   var ocrInput=cxFind(fresh,/评论主贴|写评论|写回复|发表评论|说点什么|请输入/,H*0.72);
   var tapInX=ocrInput?ocrInput.x:Math.round(W*0.32);
@@ -4555,44 +4675,39 @@ function discussion(v){
     if(wroteDisc){
       sleep(320);
       var sendPage=view();
-      var sendBtn=cxId(PKG+':id/btnSubmit').findOnce()||cxFind(sendPage,/^(?:发布|发送|提交|完成|发表)$/,H*0.35);
-      persist({status:'posted',text:answer,at:Date.now()});
-      if(sendBtn&&typeof sendBtn.click==='function'){
-        var sendClicked=false,sendBounds=null;
-        try{sendClicked=!!sendBtn.click();}catch(ignore){}
-        if(!sendClicked){
-          try{sendBounds=sendBtn.bounds();}catch(ignore){}
-          tap(sendBounds?sendBounds.centerX():Math.round(W*0.91),sendBounds?sendBounds.centerY():Math.round(H*0.62));}}
-      else if(sendBtn)tap(sendBtn.x,sendBtn.y);
-      else tap(Math.round(W*0.91),Math.round(H*0.62));
+      persist({status:'pending',text:answer,at:Date.now(),tries:1});
+      pressSend(sendPage);
       sleep(550);
       closeKeyboardSafely();
-      cxLog('已填写并发送讨论回复');
-      finish();
+      cxLog('已填写并发送讨论回复，等待核对结果');
       return;}
     closeKeyboardSafely();}}
 enableBackgroundKeepAlive();
 initFloatingControlPanel();
-cxLog('课程助手 v6.14 独立应用版已启动（免无障碍/自适应双引擎 + 后台保活）');
+cxLog('课程助手 v'+APP_VERSION+' 独立应用版已启动（免无障碍/自适应双引擎 + 后台保活）');
 while(true){
   try{
     if(Date.now()-LAST_KEEP_ALIVE_RENEW>1200000){LAST_KEEP_ALIVE_RENEW=Date.now();try{device.keepScreenDim(3600*1000);}catch(ignore){}}
     if(SCRIPT_PAUSED){sleep(600);continue;}
     if(!getExecutionMode()){
-      updateFloatingStatus('请开启 Shizuku 或无障碍服务');
+      updateFloatingStatus('请开启 Shizuku、Root 授权或无障碍服务');
       if(!PERM_GUIDE_SHOWN){
         PERM_GUIDE_SHOWN=true;
         threads.start(function(){
           try{
             var idx=dialogs.select('选择运行模式（免无障碍 / 兼容模式）',[
               '1. 使用 Shizuku 免无障碍模式（推荐，需先启动 Shizuku）',
-              '2. 开启无障碍兼容模式（前往系统无障碍设置）',
-              '3. 稍后手动开启（保持悬浮窗待命）'
+              '2. 使用 Root 免无障碍模式（需在授权弹窗中允许）',
+              '3. 开启无障碍兼容模式（前往系统无障碍设置）',
+              '4. 稍后手动开启（保持悬浮窗待命）'
             ]);
             if(idx===0){
               SHIZUKU_REQ_TRIED=false;
               detectShellBackend();
             }else if(idx===1){
+              ROOT_PROBE.at=0;
+              if(!detectShellBackend())toast('未获得 Root 授权');
+            }else if(idx===2){
               try{app.startActivity({action:'android.settings.ACCESSIBILITY_SETTINGS'});}catch(ignore){}
             }
           }catch(ignore){}});}
@@ -4676,10 +4791,11 @@ while(true){
     if(handleSubmitConfirmation(v))continue;
     if(recoverMissingQuestion(v))continue;
     if(submissionFailed(v)){
+      if(handleQuizNotPassed(v))continue;
       STATE.quizPending=true;
       if(Date.now()-STATE.lastLog>15000){
         STATE.lastLog=Date.now();
-        cxLog('学习通提示未及格或提交失败，等待核对答案，暂停翻页和重复提交');}
+        cxLog('学习通提示提交失败，等待核对，暂停翻页和重复提交');}
       sleep(1200);
       continue;}
     if(STATE.awaitingSubmitResult&&submissionSucceeded(v)){
@@ -4730,6 +4846,12 @@ while(true){
       cxLog('已确认跳过非视频/测验任务点，点击【下一章节】进入下一节');
       sleep(850);
       continue;}
+    if(quizAbandoned()){
+      STATE.quizPending=false;STATE.awaitingSubmitResult=false;STATE.quizSeek=null;
+      if(isChapterContent(v)){chapter(v);continue;}
+      if(pagerInfo(v)||quizSubmitButton(v)||/答题卡|请输入答案|请输入内容|请输入文字|第\s*\d+\s*空|单选|多选|判断|填空|简答/.test(v.s)){
+        cxLog('该测验已放弃重做，退出测验页面继续其他任务点');
+        safeBack();sleep(700);continue;}}
     var activeQs=questions(v);
     if(activeQs.length){
       quiz(v);
