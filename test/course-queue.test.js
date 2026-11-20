@@ -2,7 +2,7 @@
 // 运行：node test/course-queue.test.js
 var fs=require('fs'),path=require('path'),assert=require('assert');
 var file=fs.readdirSync(path.join(__dirname,'..')).filter(function(f){return /^ChaoxingVideoAssistant-v6\.\d+\.js$/.test(f);}).sort().pop();
-var src=fs.readFileSync(path.join(__dirname,'..',file),'utf8');
+var src=fs.readFileSync(path.join(__dirname,'..',file),'utf8').replace(/\r\n/g,'\n');
 var cut=src.indexOf('enableBackgroundKeepAlive();\ninitFloatingControlPanel();');
 assert(cut>0,'未找到主循环入口');
 var body=src.slice(0,cut)+'\nglobalThis.__t={STATE:STATE,CFG:CFG,courseCards:courseCards,handleCourseQueue:handleCourseQueue,'+

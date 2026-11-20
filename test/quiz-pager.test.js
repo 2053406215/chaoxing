@@ -2,7 +2,7 @@
 // 用桩替换 Auto.js 运行时，模拟一份 5 题的翻页测验，驱动脚本内部的 quiz()。
 var fs=require('fs'),path=require('path'),assert=require('assert');
 var file=fs.readdirSync(path.join(__dirname,'..')).filter(function(f){return /^ChaoxingVideoAssistant-v6\.\d+\.js$/.test(f);}).sort().pop();
-var src=fs.readFileSync(path.join(__dirname,'..',file),'utf8');
+var src=fs.readFileSync(path.join(__dirname,'..',file),'utf8').replace(/\r\n/g,'\n');
 var cut=src.indexOf('enableBackgroundKeepAlive();\ninitFloatingControlPanel();');
 assert(cut>0,'未找到主循环入口');
 var body=src.slice(0,cut)+'\nglobalThis.__t={quiz:quiz,STATE:STATE,view:view,fill:fillOptionLetters};\n})();';

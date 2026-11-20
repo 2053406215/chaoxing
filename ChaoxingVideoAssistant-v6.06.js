@@ -1,11 +1,13 @@
-// ChaoxingVideoAssistant-v6.05.js
-// 超星学习通课程助手 v6.05（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// ChaoxingVideoAssistant-v6.06.js
+// 超星学习通课程助手 v6.06（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// v6.06：按模拟器真机验证修正——无搜索框课程的标签行、目录行“任务点已完成”描述导致的误判、课程卡片识别、
+//        目录按“章节任务点N个”文字直接找未完成章节、未装 OCR 插件时不再刷屏报错、Android 14 屏幕共享授权自动点击。
 // v6.05：多门课程排队（面板中开启）；课程“任务”标签不再被误认为章节目录。
 // v6.04：修复 v6.03 的逻辑错误；Root 引擎可用；未及格自动重做；讨论发表核对；
 //        结果页学习正确答案；卡住自动恢复与提醒；漏答弹窗自动补答；答题接口与模型可配置。
 (function(){
 var PKG='com.chaoxing.mobile';
-var APP_VERSION='6.05';
+var APP_VERSION='6.06';
 var STORE=storages.create('chaoxing_assistant_v578');
 var W=Math.min(device.width||1080,device.height||2400);
 var H=Math.max(device.width||1080,device.height||2400);
@@ -807,12 +809,14 @@ function ensureScreenCapture(){
     }catch(ignore){}}
   try{
     threads.start(function(){
-      sleep(620);
-      try{
-        if(typeof auto!=='undefined'&&auto&&auto.service&&typeof textMatches==='function'){
-          var btn=textMatches(/^(?:立即开始|允许|开始录制|确定)$/).findOnce();
-          if(btn&&btn.click())return;}
-      }catch(ignore){}
+      // Android 14 起授权弹窗按钮是“共享屏幕”，弹窗出现时间也不固定，多看几次
+      for(var tries=0;tries<12;tries++){
+        sleep(500);
+        try{
+          if(typeof auto!=='undefined'&&auto&&auto.service&&typeof textMatches==='function'){
+            var btn=textMatches(/^(?:立即开始|允许|开始录制|确定|共享屏幕|立即共享|开始共享)$/).findOnce();
+            if(btn&&btn.click())return;}
+        }catch(ignore){}}
     });
     if(images.requestScreenCapture()){
       SCREEN_CAPTURE_READY=true;
@@ -820,6 +824,23 @@ function ensureScreenCapture(){
       return true;}
   }catch(ignore){}
   return false;}
+var OCR_STATE={until:0,warned:false};
+function ocrDetect(im){
+  // AutoJs6 6.8 起文字识别要装插件；没装时每次调用都会报错，停用一段时间只用无障碍文字
+  if(OCR_STATE.until&&Date.now()<OCR_STATE.until)return [];
+  if(typeof ocr==='undefined'||!ocr)return [];
+  try{return ocr.detect(im);}
+  catch(e){
+    var msg=String(e);
+    if(/回收|recycled/i.test(msg))throw e;
+    if(/OCR\s*插件|OCR plugin|plugin/i.test(msg)){
+      OCR_STATE.until=Date.now()+600000;
+      if(!OCR_STATE.warned){
+        OCR_STATE.warned=true;
+        cxLog('AutoJs6 未安装文字识别插件，已改为只用无障碍读取页面文字（图片题识别不可用）。可在 AutoJs6「插件中心」安装 ML Kit OCR 或 Paddle OCR');}
+      return [];}
+    if(ocr.mlkit&&ocr.mlkit.detect)return ocr.mlkit.detect(im);
+    throw e;}}
 function decodeXmlEntities(str){
   return String(str||'')
     .replace(/&#(\d+);/g,function(_,d){return String.fromCharCode(parseInt(d,10));})
@@ -1240,6 +1261,12 @@ var CHAPTER=(function(){
       doSwipe(Math.round(W*0.08),Math.round(H*0.65),Math.round(W*0.08),Math.round(H*0.35),520);
       return {type:'searching'};}};
 })();
+function isCourseTabRow(n){
+  // 课程页“任务/章节/更多”标签行：有搜索框时约在 0.13H，没有搜索框时约在 0.087H（1920 高的屏幕上是 166）
+  return n.y>H*0.06&&n.y<H*0.17;}
+function isDirectoryRowDesc(t){
+  // 章节目录每一行的无障碍描述，例如“2.2生命的基本特征，章节任务点1个”“1.1教学大纲任务点已完成”
+  return /^\s*\d+(?:\.\d+)+\s*\S[\s\S]*?(?:[，,]\s*章节任务点\s*\d+\s*个|任务点已完成)\s*$/.test(String(t||''));}
 function findDirectoryChapterRows(v){
   if(!v||!v.n)return [];
   var rows=[];
@@ -1247,28 +1274,35 @@ function findDirectoryChapterRows(v){
     if(n.y<=H*0.16||n.y>=H*0.94)return;
     var m=n.t.trim().match(/(?:^|\s)(\d+(?:\.\d+)+)(?:\s*(\S.*))?$/);
     if(m){
-      var num=m[1],titlePart=m[2]||'';
+      var num=m[1],titlePart=(m[2]||'').replace(/(?:[，,]\s*章节任务点\s*\d+\s*个|任务点已完成)\s*$/,'');
       if(!titlePart){
-        var sameLine=v.n.filter(function(z){return z!==n&&Math.abs(z.y-n.y)<H*0.024&&z.x>n.x&&!/^\d+$/.test(z.t.trim());})[0];
+        var sameLine=v.n.filter(function(z){return z!==n&&Math.abs(z.y-n.y)<H*0.024&&z.x>n.x&&!/^\d+$/.test(z.t.trim())&&!isDirectoryRowDesc(z.t);})[0];
         if(sameLine)titlePart=sameLine.t.trim();}
       if(!rows.some(function(r){return r.num===num||Math.abs(r.y-n.y)<H*0.025;})){
         rows.push({num:num,t:num+' '+titlePart,x:Math.round(W*0.48),y:n.y,node:n.node});}}});
+  rows.forEach(function(r){
+    v.n.forEach(function(n){
+      if(Math.abs(n.y-r.y)>=H*0.02)return;
+      if(/[，,]\s*章节任务点\s*\d+\s*个/.test(n.t))r.pending=true;
+      else if(isDirectoryRowDesc(n.t))r.done=true;});});
   rows.sort(function(a,b){return a.y-b.y;});
   return rows;}
 function isCourseTaskTab(v){
   if(!v||!v.n)return false;
-  function tab(re){return v.n.some(function(n){return re.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;});}
+  function tab(re){return v.n.some(function(n){return re.test(n.t.trim())&&isCourseTabRow(n);});}
   if(!tab(/^任务$/)||!tab(/^章节$/))return false;
-  if(/说明.*章节中阅读|说明.*有效阅读时长|计入有效/.test(v.s))return false;
+  if(/说明.*章节中阅读|说明.*有效阅读时长|计入有效|任务点进度/.test(v.s))return false;
   if(findDirectoryChapterRows(v).length)return false;
-  return v.n.some(function(n){return /^(?:作业\/考试|作业|考试|讨论)$/.test(n.t.trim())&&n.y>H*0.17&&n.y<H*0.5&&n.x<W*0.5;});}
+  return v.n.some(function(n){return /^(?:作业\/考试|作业|考试|讨论)$/.test(n.t.trim())&&n.y>H*0.12&&n.y<H*0.5&&n.x<W*0.5;});}
 function isCourseListPage(v){
   if(!v||!v.n)return false;
   if(!v.n.some(function(n){return /^课程$/.test(n.t.trim())&&n.y<H*0.11&&n.x>W*0.3&&n.x<W*0.7;}))return false;
-  return !v.n.some(function(n){return /^(?:任务|章节)$/.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;});}
+  return !v.n.some(function(n){return /^(?:任务|章节)$/.test(n.t.trim())&&isCourseTabRow(n);});}
 function readCourseTitle(v){
+  var bar=nativeField(v,'toolbar_tv_title');
+  if(bar&&!/^(?:课程|章节)$/.test(bar.t.trim()))return bar.t.trim();
   var found=v.n.filter(function(n){
-    return n.y<H*0.11&&n.x>W*0.25&&n.x<W*0.75&&n.t.trim().length>=2&&!/^(?:客服|课程)$/.test(n.t.trim());
+    return n.y<H*0.11&&n.x>W*0.25&&n.x<W*0.75&&n.t.trim().length>=2&&!/^(?:客服|课程|搜索)$/.test(n.t.trim());
   }).sort(function(a,b){return b.t.length-a.t.length;})[0];
   return found?found.t.trim():'';}
 function normCourse(text){
@@ -1282,9 +1316,15 @@ function courseDone(name){
   return Object.keys(q.done).some(function(d){
     return d===n||(Math.min(d.length,n.length)>=6&&(d.indexOf(n)===0||n.indexOf(d)===0));});}
 function courseCards(v){
+  // 学习通原生列表里每张课程卡的课程名是 tv_name，能拿到就直接用，不靠行距分组
+  var named=v.n.filter(function(n){
+    try{return n.node&&String(n.node.id())===PKG+':id/tv_name'&&n.y>H*0.115&&n.y<H*0.97;}catch(e){return false;}});
+  if(named.length){
+    return named.map(function(n){return {y:n.y,lastY:n.y,lines:[n],name:normCourse(n.t.replace(/[✨\s]*智慧课程\s*$/,''))};})
+      .filter(function(card){return card.name.length>=2;});}
   var lines=v.n.filter(function(n){
     var t=n.t.trim();
-    return n.y>H*0.115&&n.y<H*0.97&&n.x>W*0.08&&n.x<W*0.88&&t.length>=2&&!/^(?:全部学期|智慧课程)$/.test(t);
+    return n.y>H*0.115&&n.y<H*0.97&&n.x>W*0.08&&n.x<W*0.88&&t.length>=2&&!/^(?:全部学期|智慧课程|搜索)$/.test(t);
   }).sort(function(a,b){return a.y-b.y||a.x-b.x;});
   var cards=[],cur=null;
   lines.forEach(function(n){
@@ -1342,7 +1382,7 @@ function pickNextCourse(v){
 function handleCourseQueue(v){
   if(isCourseTaskTab(v)&&(STATE.taskTabSwitches||0)<4){
     STATE.taskTabSwitches=(STATE.taskTabSwitches||0)+1;
-    var chapterTab=v.n.filter(function(n){return /^章节$/.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;})[0];
+    var chapterTab=v.n.filter(function(n){return /^章节$/.test(n.t.trim())&&isCourseTabRow(n);})[0];
     if(chapterTab&&(cxPress(chapterTab)||tap(chapterTab.x,chapterTab.y))){
       cxLog('当前在课程的“任务”标签，切换到“章节”');
       sleep(700);
@@ -1374,13 +1414,20 @@ function isDirectoryPage(v){
   if(!v||!v.n)return false;
   if(isCourseTaskTab(v))return false;
   if(v.n.some(function(n){return /^讨论$/.test(n.t.trim())&&n.y<H*0.12&&n.x>W*0.75;}))return false;
-  if(/上一节|下一节|下一讲|观看时长|完成条件|未完成任务点前|任务点已完成|写笔记|章节测验|本次得分|最终得分|我的答案|正确答案|单选题|多选题|判断题|填空题/.test(v.s))return false;
-  if(v.n.some(function(n){return /^任务点/.test(n.t.trim())&&n.x<W*0.35;}))return false;
-  if(/知识图谱|说明.*章节中阅读|说明.*有效阅读时长|计入有效|章节列表|课程章节/.test(v.s))return true;
-  var hasDirTabs=v.n.some(function(n){return /^任务$/.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17&&n.x<W*0.25;})&&
-                 v.n.some(function(n){return /^(?:知识图谱|更多)$/.test(n.t.trim())&&n.y>H*0.09&&n.y<H*0.17;});
-  if(hasDirTabs)return true;
   var rows=findDirectoryChapterRows(v);
+  var onChapterTab=v.n.some(function(n){return /^任务$/.test(n.t.trim())&&isCourseTabRow(n)&&n.x<W*0.25;})&&
+                   v.n.some(function(n){return /^章节$/.test(n.t.trim())&&isCourseTabRow(n);});
+  if(onChapterTab&&(rows.length>=2||/说明.*章节中阅读|说明.*有效阅读时长|任务点进度/.test(v.s)))return true;
+  // 目录行的无障碍描述里带“任务点已完成”，判断是不是章节内容页时要先把它们去掉
+  var body=v.n.filter(function(n){return !isDirectoryRowDesc(n.t)&&!/^任务点进度/.test(n.t.trim());});
+  var bodyText=body.map(function(n){return n.t;}).join('|');
+  if(/上一节|下一节|下一讲|观看时长|完成条件|未完成任务点前|任务点已完成|写笔记|本次得分|最终得分|我的答案|正确答案|单选题|多选题|判断题|填空题/.test(bodyText))return false;
+  if(/章节测验/.test(bodyText)&&!rows.some(function(r){return /章节测验/.test(r.t);}))return false;
+  if(body.some(function(n){return /^任务点/.test(n.t.trim())&&n.x<W*0.35;}))return false;
+  if(/知识图谱|说明.*章节中阅读|说明.*有效阅读时长|计入有效|章节列表|课程章节/.test(v.s))return true;
+  var hasDirTabs=v.n.some(function(n){return /^任务$/.test(n.t.trim())&&isCourseTabRow(n)&&n.x<W*0.25;})&&
+                 v.n.some(function(n){return /^(?:知识图谱|更多)$/.test(n.t.trim())&&isCourseTabRow(n);});
+  if(hasDirTabs)return true;
   return rows.length>=3;}
 function hasOrangeBadgeAtRowY(im,rowY){
   if(!isImageAlive(im))return false;
@@ -1436,8 +1483,14 @@ function scanUnfinishedChapters(existingView){
   var im=picture();
   var targetRow=null;
   STATE.dirRowVisits=STATE.dirRowVisits||{};
+  // 无障碍描述里直接写着“章节任务点N个”的行就是未完成章节，不必等截图取色
+  var textPriorNum=(STATE.workChapter&&STATE.workChapter.number?STATE.workChapter.number:STATE.quizContext)||RESUME_CHAPTER;
+  var textSkipRe=/^(?:\d+(?:\.\d+)*\s*)?(?:PPT|课件|文献阅读|课外阅读|拓展阅读|参考资料|讨论)(?:[（(].*[)）])?$/i;
+  var pendingRows=rows.filter(function(r){return r.pending&&!(CFG.onlyVideoQuiz&&textSkipRe.test(r.t));});
+  targetRow=pendingRows.filter(function(r){return r.num===textPriorNum&&(STATE.dirRowVisits[r.num]||0)<2;})[0]||
+            pendingRows.filter(function(r){return (STATE.dirRowVisits[r.num]||0)<1;})[0]||null;
   try{
-    if(im){
+    if(im&&!targetRow){
       var priorNum=(STATE.workChapter&&STATE.workChapter.number?STATE.workChapter.number:STATE.quizContext)||RESUME_CHAPTER;
       var skipDirTitleRe=/^(?:\d+(?:\.\d+)*\s*)?(?:PPT|课件|文献阅读|课外阅读|拓展阅读|参考资料|讨论)(?:[（(].*[)）])?$/i;
       if(priorNum){
@@ -1858,14 +1911,14 @@ function view(){
       var results;
       if(!isImageAlive(im))im=picture();
       if(isImageAlive(im)){
-        try{results=ocr.detect(im);}
+        try{results=ocrDetect(im);}
         catch(primaryError){
           if(/回收|recycled/i.test(String(primaryError))){
             SCREEN_CAPTURE_READY=false;
             im=picture();}
           if(isImageAlive(im)){
             if(ocr.mlkit&&ocr.mlkit.detect)results=ocr.mlkit.detect(im);
-            else results=ocr.detect(im);
+            else results=ocrDetect(im);
           }else results=[];}
       }else{
         results=[];}
@@ -2057,7 +2110,7 @@ function videoView(){
       var vh=isLetterbox?(iw*iw/ih):ih;
       var vTop=isLetterbox?((ih-vh)/2):0;
       var sx=pw/iw,sy=ph/vh;
-      var results=ocr.detect(im);
+      var results=ocrDetect(im);
       if(Array.isArray(results))results.forEach(function(r){
         var t=String(r.label||r.text||'').trim(),b=r.bounds;
         if(!t||!b)return;
@@ -3400,7 +3453,7 @@ function clipboardCandidate(text){
     var image=picture();
     if(image)try{
       var results;
-      try{results=ocr.detect(image);}
+      try{results=ocrDetect(image);}
       catch(e){
         if(ocr.mlkit&&ocr.mlkit.detect)results=ocr.mlkit.detect(image);
         else throw e;}
