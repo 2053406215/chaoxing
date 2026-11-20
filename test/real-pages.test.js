@@ -10,7 +10,7 @@ assert(cut>0,'未找到主循环入口');
 var body=src.slice(0,cut)+'\nglobalThis.__t={STATE:STATE,CFG:CFG,courseCards:courseCards,handleCourseQueue:handleCourseQueue,'+
   'isDirectoryPage:isDirectoryPage,isCourseTaskTab:isCourseTaskTab,isCourseListPage:isCourseListPage,isChapterContent:isChapterContent,'+
   'findDirectoryChapterRows:findDirectoryChapterRows,readCourseTitle:readCourseTitle,scanUnfinishedChapters:scanUnfinishedChapters,'+
-  'ocrDetect:ocrDetect,RECENT_LOGS:RECENT_LOGS};\n})();';
+  'ocrDetect:ocrDetect,keyWarning:keyWarning,muteMediaForVideo:muteMediaForVideo,restoreMediaVolume:restoreMediaVolume,DEFAULT_LLM_URL:DEFAULT_LLM_URL,RECENT_LOGS:RECENT_LOGS};\n})();';
 
 var now=1e12;Date.now=function(){return now;};
 var W=1080,H=1920,PKG='com.chaoxing.mobile';
@@ -124,4 +124,23 @@ assert.strictEqual(t.RECENT_LOGS.slice(before).filter(function(l){return /文字
 now+=601000;
 t.ocrDetect({});
 assert.strictEqual(sim.ocrCalls,2,'10 分钟后重试一次');
+// 8. Key 栏误填成网址时提醒（模拟器上实际填进去过 https://filehelper.weixin.qq.com/）。
+assert(t.keyWarning('https://filehelper.weixin.qq.com/',t.DEFAULT_LLM_URL),'网址应提醒');
+assert(t.keyWarning('abc123',t.DEFAULT_LLM_URL),'官方接口下不是 sk- 开头应提醒');
+assert.strictEqual(t.keyWarning('sk-0123456789abcdef0123',t.DEFAULT_LLM_URL),'');
+assert.strictEqual(t.keyWarning('abc123def456ghi789','https://relay.example.com/v1/chat/completions'),'','中转接口的 Key 格式不限');
+assert.strictEqual(t.keyWarning('',t.DEFAULT_LLM_URL),'');
+// 9. 静音/恢复音量不能走 device.setMusicVolume：没有“修改系统设置”权限时它会打开系统设置页，
+//    视频播完后学习通被挤到后台，脚本一直等在“后台保活”（模拟器上实际发生过）。
+var volCalls=[];
+globalThis.device.getMusicVolume=function(){return 7;};
+globalThis.device.setMusicVolume=function(v){volCalls.push('device:'+v);};
+globalThis.android={content:{Context:{AUDIO_SERVICE:'audio'}},provider:{Settings:{System:{canWrite:function(){return false;}}}}};
+globalThis.context={getSystemService:function(){return null;}};
+t.muteMediaForVideo();t.restoreMediaVolume();
+assert.deepStrictEqual(volCalls,[],'没有 AudioManager 且没有写设置权限时不应调用 device.setMusicVolume');
+var amVol=6;
+globalThis.context={getSystemService:function(){return {getStreamVolume:function(){return amVol;},setStreamVolume:function(st,v){volCalls.push('am:'+st+':'+v);amVol=v;}};}};
+t.muteMediaForVideo();t.restoreMediaVolume();
+assert.deepStrictEqual(volCalls,['am:3:0','am:3:6'],'应通过 AudioManager 静音并恢复原音量');
 realLog('real-pages: ok');

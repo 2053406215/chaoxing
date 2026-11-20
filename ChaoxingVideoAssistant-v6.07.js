@@ -1,5 +1,7 @@
-// ChaoxingVideoAssistant-v6.06.js
-// 超星学习通课程助手 v6.06（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// ChaoxingVideoAssistant-v6.07.js
+// 超星学习通课程助手 v6.07（免无障碍 Shizuku/Root + 无障碍自适应双引擎 + 后台保活 + 智能防漏答复查版）
+// v6.07：静音/恢复音量改用 AudioManager（原来没有“修改系统设置”权限时会弹出系统设置页，视频播完后卡住）；
+//        保存时检查答题 Key 格式（误填网址等会提醒）。
 // v6.06：按模拟器真机验证修正——无搜索框课程的标签行、目录行“任务点已完成”描述导致的误判、课程卡片识别、
 //        目录按“章节任务点N个”文字直接找未完成章节、未装 OCR 插件时不再刷屏报错、Android 14 屏幕共享授权自动点击。
 // v6.05：多门课程排队（面板中开启）；课程“任务”标签不再被误认为章节目录。
@@ -7,12 +9,19 @@
 //        结果页学习正确答案；卡住自动恢复与提醒；漏答弹窗自动补答；答题接口与模型可配置。
 (function(){
 var PKG='com.chaoxing.mobile';
-var APP_VERSION='6.06';
+var APP_VERSION='6.07';
 var STORE=storages.create('chaoxing_assistant_v578');
 var W=Math.min(device.width||1080,device.height||2400);
 var H=Math.max(device.width||1080,device.height||2400);
 var KEY=String(STORE.get('deepseekKey','')||'').trim();
 var DEFAULT_LLM_URL='https://api.deepseek.com/chat/completions',DEFAULT_LLM_MODEL='deepseek-chat';
+function keyWarning(key,url){
+  // 只做提醒不拦截：常见的填错是把网址或别的文字粘进 Key 栏
+  var k=String(key||'').trim();
+  if(!k)return '';
+  if(/^https?:\/\//i.test(k)||/\s/.test(k))return '填的不像 API Key（是网址或带空格），请检查';
+  if(String(url||DEFAULT_LLM_URL)===DEFAULT_LLM_URL&&!/^sk-[A-Za-z0-9_-]{16,}$/.test(k))return 'DeepSeek 的 Key 一般以 sk- 开头，请检查是否填对';
+  return '';}
 function cleanLlmUrl(value){
   var url=String(value||'').trim();
   return /^https?:\/\/\S+$/i.test(url)?url:DEFAULT_LLM_URL;}
@@ -302,19 +311,35 @@ function clampRedo(value){
   if(!(n>=0))n=2;
   return Math.min(5,Math.floor(n));}
 var SAVED_MEDIA_VOL=-1;
+// AutoJs6 的 device.setMusicVolume 需要“修改系统设置”权限，没授权时会直接打开系统设置页，
+// 把学习通挤到后台（模拟器上视频播完后就卡在那个设置页）。改为直接用 AudioManager，它不需要这个权限。
+function audioManager(){
+  try{return context.getSystemService(android.content.Context.AUDIO_SERVICE);}catch(ignore){return null;}}
+function canWriteSystemSettings(){
+  try{return !!android.provider.Settings.System.canWrite(context);}catch(ignore){return false;}}
+function getMediaVolume(){
+  var am=audioManager();
+  if(am){try{return Number(am.getStreamVolume(3));}catch(ignore){}}
+  try{if(typeof device!=='undefined'&&device.getMusicVolume)return Number(device.getMusicVolume());}catch(ignore){}
+  return -1;}
+function setMediaVolume(vol){
+  var am=audioManager();
+  if(am){try{am.setStreamVolume(3,vol,0);return true;}catch(ignore){}}
+  if(canWriteSystemSettings()){
+    try{if(typeof device!=='undefined'&&device.setMusicVolume){device.setMusicVolume(vol);return true;}}catch(ignore){}}
+  return false;}
 function muteMediaForVideo(){
   if(!CFG.autoMute)return;
   try{
-    if(typeof device!=='undefined'&&device.getMusicVolume&&device.setMusicVolume){
-      if(SAVED_MEDIA_VOL<0)SAVED_MEDIA_VOL=Number(device.getMusicVolume());
-      if(Number(device.getMusicVolume())>0){
-        device.setMusicVolume(0);
-        cxLog('已自动静音媒体音量（退出视频后恢复）');}}
+    var cur=getMediaVolume();
+    if(cur<0)return;
+    if(SAVED_MEDIA_VOL<0)SAVED_MEDIA_VOL=cur;
+    if(cur>0&&setMediaVolume(0))cxLog('已自动静音媒体音量（退出视频后恢复）');
   }catch(ignore){}}
 function restoreMediaVolume(){
   try{
-    if(SAVED_MEDIA_VOL>=0&&typeof device!=='undefined'&&device.setMusicVolume){
-      device.setMusicVolume(SAVED_MEDIA_VOL);
+    if(SAVED_MEDIA_VOL>=0){
+      setMediaVolume(SAVED_MEDIA_VOL);
       SAVED_MEDIA_VOL=-1;}
   }catch(ignore){}}
 var SMART_RECOGNIZER={
@@ -628,7 +653,9 @@ function openVisualControlCenter(isInitial){
           STORE.put('cfgOnlyVideoQuizV2',CFG.onlyVideoQuiz);
           SCRIPT_PAUSED=false;
           updateFloatingStatus('设置已保存，自动运行中');
-          toast('设置已保存');
+          var keyWarn=keyWarning(KEY,LLM.url);
+          if(keyWarn){toast('设置已保存，但'+keyWarn);cxLog('答题 Key '+keyWarn);}
+          else toast('设置已保存');
           try{dlg.dismiss();}catch(ignore){}});
         dlg.show();
       }catch(innerErr){
@@ -638,7 +665,7 @@ function openVisualControlCenter(isInitial){
             if(dk!==null){KEY=String(dk||'').trim();STORE.put('deepseekKey',KEY);}
             var vk=dialogs.rawInput('可选：阿里云百炼识图 API Key（用于图片题，可留空）',VISION.key||'');
             if(vk!==null){VISION.key=String(vk||'').trim();STORE.put('visionKey',VISION.key);}
-            if(KEY)toast('密钥已保存');
+            if(KEY)toast(keyWarning(KEY,LLM.url)||'密钥已保存');
           }catch(ignore){}});}});
   }catch(e){
     if(!isInitial)cxLog('打开控制中心失败：'+e);}}
